@@ -1,4 +1,7 @@
-import { validateServerUrl } from '../src/config/validation';
+import {
+  canonicalServerOrigin,
+  validateServerUrl,
+} from '../src/config/validation';
 
 describe('validateServerUrl', () => {
   test('accepts valid HTTPS origins and strips trailing slashes', () => {
@@ -54,5 +57,23 @@ describe('validateServerUrl', () => {
       valid: false,
       reason: 'invalid_format',
     });
+  });
+
+  test('normalizes canonical server origins across default ports and casing', () => {
+    expect(canonicalServerOrigin('HTTPS://Host.TS.net:0443/')).toBe(
+      'https://host.ts.net',
+    );
+    expect(canonicalServerOrigin('https://host.ts.net')).toBe(
+      'https://host.ts.net',
+    );
+    expect(canonicalServerOrigin('http://127.0.0.1:80')).toBe(
+      'http://127.0.0.1',
+    );
+    expect(canonicalServerOrigin('http://127.0.0.1:5757')).toBe(
+      'http://127.0.0.1:5757',
+    );
+    expect(canonicalServerOrigin('http://127.0.0.1:8443')).toBe(
+      'http://127.0.0.1:8443',
+    );
   });
 });

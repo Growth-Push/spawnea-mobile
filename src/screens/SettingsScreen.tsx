@@ -20,7 +20,10 @@ import {
   SpawneaApiClient,
 } from '../api/client';
 import { isDebugLoopbackAllowed } from '../config/runtime';
-import { validateServerUrl } from '../config/validation';
+import {
+  canonicalServerOrigin,
+  validateServerUrl,
+} from '../config/validation';
 import {
   BiometryCapability,
   deleteApiKey,
@@ -209,10 +212,32 @@ export function SettingsScreen({
           message: 'Server URL and API key saved in Android Keystore.',
         });
       } else {
-        const updateResult = await updateSavedServerUrl(urlCheck.normalizedUrl);
-        if (!updateResult.ok) {
-          await handleSaveFailure(updateResult);
+        const existingOrigin = existingState.serverUrl
+          ? canonicalServerOrigin(existingState.serverUrl)
+          : null;
+        const targetOrigin = canonicalServerOrigin(urlCheck.normalizedUrl);
+
+        if (existingOrigin !== targetOrigin) {
+          setApiKeyInput('');
+          setHasSavedKey(existingState.hasKey);
+          setIsIncomplete(existingState.incomplete);
+          setSaveBanner({
+            tone: 'error',
+            message:
+              'Changing the server origin requires entering the API key again.',
+          });
           return;
+        }
+
+        if (existingState.serverUrl !== urlCheck.normalizedUrl) {
+          const updateResult = await updateSavedServerUrl(
+            urlCheck.normalizedUrl,
+          );
+          if (!updateResult.ok) {
+            await handleSaveFailure(updateResult);
+            return;
+          }
+          apiClient.notifyCredentialsChanged();
         }
 
         await clearLegacyServerUrl();
@@ -220,12 +245,10 @@ export function SettingsScreen({
         setServerUrl(urlCheck.normalizedUrl);
         setHasSavedKey(true);
         setIsIncomplete(false);
-        if (existingState.serverUrl !== urlCheck.normalizedUrl) {
-          apiClient.notifyCredentialsChanged();
-        }
         setSaveBanner({
           tone: 'success',
-          message: 'Server URL updated. Existing protected API key kept.',
+          message:
+            'Server origin unchanged; existing protected API key kept.',
         });
       }
 

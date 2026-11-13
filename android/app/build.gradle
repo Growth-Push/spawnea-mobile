@@ -73,6 +73,47 @@ def enableProguardInReleaseBuilds = false
  */
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 
+def releaseSigningSetting = { String key, boolean trimValue = false ->
+    def prop = project.findProperty(key)
+    if (prop != null && !prop.toString().trim().isEmpty()) {
+        def raw = prop.toString()
+        return trimValue ? raw.trim() : raw
+    }
+    def env = System.getenv(key)
+    if (env != null && !env.trim().isEmpty()) {
+        return trimValue ? env.trim() : env
+    }
+    return null
+}
+
+def releaseStoreFilePath = releaseSigningSetting('SPAWNEA_RELEASE_STORE_FILE', true)
+def releaseStorePassword = releaseSigningSetting('SPAWNEA_RELEASE_STORE_PASSWORD')
+def releaseKeyAlias = releaseSigningSetting('SPAWNEA_RELEASE_KEY_ALIAS')
+def releaseKeyPassword = releaseSigningSetting('SPAWNEA_RELEASE_KEY_PASSWORD')
+def releaseSigningValues = [
+    SPAWNEA_RELEASE_STORE_FILE    : releaseStoreFilePath,
+    SPAWNEA_RELEASE_STORE_PASSWORD: releaseStorePassword,
+    SPAWNEA_RELEASE_KEY_ALIAS     : releaseKeyAlias,
+    SPAWNEA_RELEASE_KEY_PASSWORD  : releaseKeyPassword,
+]
+def presentReleaseKeys = releaseSigningValues.findAll { k, v -> v != null }.keySet()
+def hasCompleteReleaseSigning = presentReleaseKeys.size() == releaseSigningValues.size()
+if (presentReleaseKeys.size() > 0 && !hasCompleteReleaseSigning) {
+    def missingKeys = releaseSigningValues.findAll { k, v -> v == null }.keySet().join(', ')
+    throw new GradleException(
+        "Incomplete release signing configuration. Provided: ${presentReleaseKeys.join(', ')}; missing: ${missingKeys}. " +
+        "Provide all four of SPAWNEA_RELEASE_STORE_FILE, SPAWNEA_RELEASE_STORE_PASSWORD, SPAWNEA_RELEASE_KEY_ALIAS, and SPAWNEA_RELEASE_KEY_PASSWORD, or leave all unset to build an unsigned release APK."
+    )
+}
+def resolvedReleaseStoreFile = null
+if (hasCompleteReleaseSigning) {
+    def candidate = new File(releaseStoreFilePath)
+    resolvedReleaseStoreFile = candidate.isAbsolute() ? candidate : rootProject.file(releaseStoreFilePath)
+    if (!resolvedReleaseStoreFile.isFile()) {
+        throw new GradleException("Release keystore file does not exist: ${resolvedReleaseStoreFile}")
+    }
+}
+
 android {
     ndkVersion rootProject.ext.ndkVersion
     buildToolsVersion rootProject.ext.buildToolsVersion
@@ -93,6 +134,14 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        if (hasCompleteReleaseSigning) {
+            release {
+                storeFile resolvedReleaseStoreFile
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
     }
     buildFeatures {
         buildConfig = true
@@ -102,9 +151,9 @@ android {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            if (hasCompleteReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }

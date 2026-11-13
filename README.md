@@ -36,13 +36,33 @@ Output: `android/app/build/outputs/apk/debug/app-debug.apk`
 
 ### Release APK (bundled JavaScript)
 
+To build an unsigned release APK for verification or external signing:
+
 ```bash
 cd android && ./gradlew assembleRelease
 ```
 
-Output: `android/app/build/outputs/apk/release/app-release.apk`
+Output (unsigned): `android/app/build/outputs/apk/release/app-release-unsigned.apk`
 
-> Note: The template release build currently uses the debug signing config for local evaluation. Before distribution, configure a dedicated release keystore outside version control.
+To build a signed release APK, provide all four release signing settings via environment variables or Gradle properties (for example, in a private `~/.gradle/gradle.properties` or `-P` flags) and keep keystores and passwords outside version control:
+
+- `SPAWNEA_RELEASE_STORE_FILE`: Path to your private release keystore file (absolute, or relative to `android/`)
+- `SPAWNEA_RELEASE_STORE_PASSWORD`: Keystore password
+- `SPAWNEA_RELEASE_KEY_ALIAS`: Signing key alias
+- `SPAWNEA_RELEASE_KEY_PASSWORD`: Signing key password
+
+```bash
+cd android && \
+  SPAWNEA_RELEASE_STORE_FILE=/path/to/release.keystore \
+  SPAWNEA_RELEASE_STORE_PASSWORD=... \
+  SPAWNEA_RELEASE_KEY_ALIAS=... \
+  SPAWNEA_RELEASE_KEY_PASSWORD=... \
+  ./gradlew assembleRelease
+```
+
+Output (signed): `android/app/build/outputs/apk/release/app-release.apk`
+
+> Note: Never commit release keystores or signing credentials to the repository. Providing only a subset of the four signing variables fails the build rather than falling back to the debug keystore.
 
 ## Transport & Credential Security
 

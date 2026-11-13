@@ -103,3 +103,26 @@ export function validateServerUrl(
     normalizedUrl: `${scheme}://${host}${portSuffix}`,
   };
 }
+
+/**
+ * Returns the canonical origin (`scheme://host[:port]`) with default ports
+ * (`:443` for https, `:80` for http) and leading zeros on ports normalized.
+ */
+export function canonicalServerOrigin(normalizedUrl: string): string {
+  const lower = normalizedUrl.trim().replace(/\/+$/, '').toLowerCase();
+  const match = /^(https?):\/\/(\[[^\]]+\]|[^/:]+)(?::0*([1-9]\d*|0))?$/.exec(
+    lower,
+  );
+  if (!match) {
+    return lower;
+  }
+  const [, scheme, host, port] = match;
+  if (
+    !port ||
+    (scheme === 'https' && port === '443') ||
+    (scheme === 'http' && port === '80')
+  ) {
+    return `${scheme}://${host}`;
+  }
+  return `${scheme}://${host}:${port}`;
+}

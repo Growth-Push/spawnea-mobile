@@ -1,6 +1,9 @@
 import { NativeModules } from 'react-native';
 import { isDebugLoopbackAllowed } from '../config/runtime';
-import { validateServerUrl } from '../config/validation';
+import {
+  canonicalServerOrigin,
+  validateServerUrl,
+} from '../config/validation';
 import type {
   ApiErrorCategory,
   ApiResult,
@@ -321,25 +324,6 @@ function credentialFingerprint(serverUrl: string, apiKey: string): string {
     h2 = Math.imul(h2 ^ (ch + i), 0x85ebca6b) >>> 0;
   }
   return `${h1.toString(16)}:${h2.toString(16)}`;
-}
-
-function canonicalServerOrigin(normalizedUrl: string): string {
-  const lower = normalizedUrl.trim().replace(/\/+$/, '').toLowerCase();
-  const match = /^(https?):\/\/(\[[^\]]+\]|[^/:]+)(?::0*([1-9]\d*|0))?$/.exec(
-    lower,
-  );
-  if (!match) {
-    return lower;
-  }
-  const [, scheme, host, port] = match;
-  if (
-    !port ||
-    (scheme === 'https' && port === '443') ||
-    (scheme === 'http' && port === '80')
-  ) {
-    return `${scheme}://${host}`;
-  }
-  return `${scheme}://${host}:${port}`;
 }
 
 export class SpawneaApiClient {

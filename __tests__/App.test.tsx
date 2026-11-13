@@ -225,8 +225,7 @@ describe('SettingsScreen', () => {
     ).toContain('Previous saved configuration was kept');
     expect(notifySpy).not.toHaveBeenCalled();
 
-    // 3. URL-only write failure restores old URL and keeps existing key
-    keystore.updateServerUrl.mockRejectedValueOnce({ code: 'E_STORAGE_ERROR' });
+    // 3. Different-origin URL-only save is rejected without calling updateServerUrl or saveCredentials
     await ReactTestRenderer.act(async () => {
       urlInput.props.onChangeText('https://bad-url-write.tailnet.ts.net:5757');
       keyInput.props.onChangeText('');
@@ -234,12 +233,10 @@ describe('SettingsScreen', () => {
     await ReactTestRenderer.act(async () => {
       await saveButton.props.onPress();
     });
-    expect(
-      renderer.root.findByProps({ testID: 'server-url-input' }).props.value,
-    ).toBe(existingUrl);
+    expect(keystore.updateServerUrl).not.toHaveBeenCalled();
     expect(
       renderer.root.findByProps({ testID: 'save-status-text' }).props.children,
-    ).toContain('Previous saved configuration was kept');
+    ).toBe('Changing the server origin requires entering the API key again.');
     expect(notifySpy).not.toHaveBeenCalled();
 
     // 4. Simulated broken/incomplete native state surfaces explicit incomplete indicator (never old URL + broken key)
@@ -827,5 +824,164 @@ describe('SettingsScreen', () => {
     expect(
       renderer.root.findByProps({ testID: 'api-key-input' }).props.value,
     ).toBe('');
+  });
+
+  test('SR-2: rejects different-origin URL-only save without persisting, allows biometric save with key, and allows same-origin URL-only save', async () => {
+    const savedUrl = 'http://127.0.0.1:5757';
+    keystore.getCredentialState.mockResolvedValue({
+      serverUrl: savedUrl,
+      hasKey: true,
+      incomplete: false,
+    });
+    keystore.readKey.mockResolvedValue('saved-keystore-key');
+
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      retryAfter: null,
+      body: JSON.stringify({ apiVersion: 'v1', sessions: [] }),
+    });
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: true,
+    });
+    const notifySpy = jest.spyOn(client, 'notifyCredentialsChanged');
+
+    let renderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      renderer = ReactTestRenderer.create(
+        <SettingsScreen apiClient={client} allowDebugLoopback={true} />,
+      );
+      await flushAsync();
+    });
+
+    const urlInput = renderer.root.findByProps({ testID: 'server-url-input' });
+    const keyInput = renderer.root.findByProps({ testID: 'api-key-input' });
+    const saveButton = renderer.root.findByProps({
+      testID: 'save-settings-button',
+    });
+    const testButton = renderer.root.findByProps({
+      testID: 'test-connection-button',
+    });
+
+    // 1. Different-origin URL-only save is rejected and nothing is persisted
+    await ReactTestRenderer.act(async () => {
+      urlInput.props.onChangeText('http://127.0.0.1:8443');
+      keyInput.props.onChangeText('');
+    });
+    await ReactTestRenderer.act(async () => {
+      await saveButton.props.onPress();
+    });
+    expect(keystore.updateServerUrl).not.toHaveBeenCalled();
+    expect(keystore.saveCredentials).not.toHaveBeenCalled();
+    expect(notifySpy).not.toHaveBeenCalled();
+    expect(
+      renderer.root.findByProps({ testID: 'save-status-text' }).props.children,
+    ).toBe('Changing the server origin requires entering the API key again.');
+
+    // Test connection still targets original saved origin (5757)
+    await ReactTestRenderer.act(async () => {
+      await testButton.props.onPress();
+    });
+    expect(request).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        url: 'http://127.0.0.1:5757/api/v1/sessions',
+      }),
+    );
+
+    // 2. Different-origin save WITH a key invokes normal biometric save
+    keystore.saveCredentials.mockImplementationOnce(async () => {
+      keystore.getCredentialState.mockResolvedValue({
+        serverUrl: 'http://127.0.0.1:8443',
+        hasKey: true,
+        incomplete: false,
+      });
+      return true;
+    });
+    await ReactTestRenderer.act(async () => {
+      urlInput.props.onChangeText('http://127.0.0.1:8443');
+      keyInput.props.onChangeText('new-origin-dummy-key');
+    });
+    await ReactTestRenderer.act(async () => {
+      await saveButton.props.onPress();
+    });
+    expect(keystore.saveCredentials).toHaveBeenCalledTimes(1);
+    expect(keystore.saveCredentials).toHaveBeenCalledWith(
+      'http://127.0.0.1:8443',
+      'new-origin-dummy-key',
+      'Save Spawnea API Key',
+      expect.stringContaining('save your API key'),
+      'Cancel',
+    );
+    expect(keystore.updateServerUrl).not.toHaveBeenCalled();
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+    expect(
+      renderer.root.findByProps({ testID: 'api-key-input' }).props.value,
+    ).toBe('');
+    expect(
+      renderer.root.findByProps({ testID: 'save-status-text' }).props.children,
+    ).toBe('Server URL and API key saved in Android Keystore.');
+
+    // 3. Same-origin URL-only save (identical origin with case/trailing-slash variation) succeeds without key
+    await ReactTestRenderer.act(async () => {
+      urlInput.props.onChangeText('HTTP://127.0.0.1:8443/');
+      keyInput.props.onChangeText('');
+    });
+    await ReactTestRenderer.act(async () => {
+      await saveButton.props.onPress();
+    });
+    expect(keystore.saveCredentials).toHaveBeenCalledTimes(1);
+    expect(keystore.updateServerUrl).not.toHaveBeenCalled();
+    expect(
+      renderer.root.findByProps({ testID: 'save-status-text' }).props.children,
+    ).toBe('Server origin unchanged; existing protected API key kept.');
+
+    // 4. Same-origin default-port normalization updates stored URL without key, and handles native write failure safely
+    keystore.getCredentialState.mockResolvedValue({
+      serverUrl: 'https://saved.tailnet.ts.net:443',
+      hasKey: true,
+      incomplete: false,
+    });
+    let httpsRenderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      httpsRenderer = ReactTestRenderer.create(
+        <SettingsScreen apiClient={client} allowDebugLoopback={false} />,
+      );
+      await flushAsync();
+    });
+    const httpsUrlInput = httpsRenderer.root.findByProps({
+      testID: 'server-url-input',
+    });
+    const httpsSaveButton = httpsRenderer.root.findByProps({
+      testID: 'save-settings-button',
+    });
+    await ReactTestRenderer.act(async () => {
+      httpsUrlInput.props.onChangeText('https://saved.tailnet.ts.net/');
+    });
+    await ReactTestRenderer.act(async () => {
+      await httpsSaveButton.props.onPress();
+    });
+    expect(keystore.updateServerUrl).toHaveBeenCalledWith(
+      'https://saved.tailnet.ts.net',
+    );
+    expect(
+      httpsRenderer.root.findByProps({ testID: 'save-status-text' }).props
+        .children,
+    ).toBe('Server origin unchanged; existing protected API key kept.');
+
+    keystore.updateServerUrl.mockRejectedValueOnce({ code: 'E_STORAGE_ERROR' });
+    await ReactTestRenderer.act(async () => {
+      httpsUrlInput.props.onChangeText('https://saved.tailnet.ts.net');
+    });
+    await ReactTestRenderer.act(async () => {
+      await httpsSaveButton.props.onPress();
+    });
+    expect(
+      httpsRenderer.root.findByProps({ testID: 'server-url-input' }).props
+        .value,
+    ).toBe('https://saved.tailnet.ts.net:443');
+    expect(
+      httpsRenderer.root.findByProps({ testID: 'save-status-text' }).props
+        .children,
+    ).toContain('Previous saved configuration was kept.');
   });
 });
