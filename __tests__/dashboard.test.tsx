@@ -807,7 +807,7 @@ describe('DashboardScreen', () => {
       expect(request).toHaveBeenCalledTimes(2);
       expect(keystore.readKey).toHaveBeenCalledTimes(1);
 
-      // Backgrounding clears memory cache, marks snapshot stale/locked, and stops polling.
+      // Backgrounding clears memory cache and session snapshot, locks Dashboard, and stops polling.
       await ReactTestRenderer.act(async () => {
         appState.emit('background');
         await flushAsync();
@@ -816,7 +816,7 @@ describe('DashboardScreen', () => {
       expect(
         renderer.root.findByProps({ testID: 'dashboard-connection-status' })
           .props.children,
-      ).toContain('Stale · Locked');
+      ).toBe('Locked');
 
       await ReactTestRenderer.act(async () => {
         jest.advanceTimersByTime(60000);
@@ -1478,7 +1478,7 @@ describe('DashboardScreen', () => {
       expect(
         dashRenderer.root.findByProps({ testID: 'dashboard-connection-status' })
           .props.children,
-      ).toBe('Stale · Locked');
+      ).toBe('Locked');
 
       // Advance timers and try passive poll ticks: zero HTTP requests allowed.
       await ReactTestRenderer.act(async () => {
@@ -1809,7 +1809,10 @@ describe('DashboardScreen', () => {
       expect(getAllText(renderer)).toContain('sess-429-resume');
 
       // Passive poll with cleared cache must never prompt for biometrics.
-      cache.clear();
+      await ReactTestRenderer.act(async () => {
+        cache.clear();
+        await flushAsync();
+      });
       currentTimeMs += 10000;
       await ReactTestRenderer.act(async () => {
         jest.advanceTimersByTime(10000);
@@ -1820,7 +1823,8 @@ describe('DashboardScreen', () => {
       expect(
         renderer.root.findByProps({ testID: 'dashboard-connection-status' })
           .props.children,
-      ).toBe('Stale · Locked');
+      ).toBe('Locked');
+      expect(getAllText(renderer)).not.toContain('sess-429-resume');
     } finally {
       await ReactTestRenderer.act(async () => {
         renderer.unmount();
@@ -1923,7 +1927,8 @@ describe('DashboardScreen', () => {
       expect(
         dashRenderer.root.findByProps({ testID: 'dashboard-connection-status' })
           .props.children,
-      ).toBe('Stale · Locked');
+      ).toBe('Locked');
+      expect(getAllText(dashRenderer)).not.toContain('sess-n70-4');
 
       // Later, Settings -> Test connection succeeds -> clears terminalAuthLock without caching the key.
       keystore.readKey.mockResolvedValueOnce(TEST_KEY);
@@ -1959,4 +1964,486 @@ describe('DashboardScreen', () => {
       cache.dispose();
     }
   });
+
+  test('S70-1 clears session snapshot and rendered session data on background and inactive transitions until biometric unlock succeeds', async () => {
+    const appState = setupAppStateSpy();
+    mockConfiguredKeystore();
+    const request: jest.MockedFunction<HttpTransport['request']> = jest
+      .fn()
+      .mockResolvedValue({
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessions: [
+            makeSessionFixture({
+              id: 'sess-secret-1',
+              name: 'Private Build',
+              task: 'Deploy prod secrets',
+              status: 'working',
+              project: { id: 'p1', name: 'SecretProject' },
+              host: { id: 'h1', name: 'ProdHost' },
+            }),
+          ],
+        }),
+      });
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: false,
+    });
+    const cache = new SessionCredentialCache(true);
+
+    let renderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      renderer = ReactTestRenderer.create(
+        <DashboardScreen
+          onOpenSettings={jest.fn()}
+          onOpenSessions={jest.fn()}
+          onOpenSessionChat={jest.fn()}
+          apiClient={client}
+          credentialCache={cache}
+          allowDebugLoopback={false}
+        />,
+      );
+      await flushAsync();
+    });
+
+    try {
+      expect(getAllText(renderer)).toContain('Private Build');
+      expect(getAllText(renderer)).toContain('sess-secret-1');
+
+      await ReactTestRenderer.act(async () => {
+        appState.emit('background');
+        await flushAsync();
+      });
+
+      const bgText = getAllText(renderer);
+      expect(
+        renderer.root.findByProps({ testID: 'dashboard-connection-status' })
+          .props.children,
+      ).toBe('Locked');
+      expect(
+        renderer.root.findByProps({ testID: 'dashboard-locked-card' }),
+      ).toBeDefined();
+      expect(
+        renderer.root.findAllByProps({ testID: 'dashboard-summary-card' }),
+      ).toHaveLength(0);
+      expect(bgText).not.toContain('Private Build');
+      expect(bgText).not.toContain('Deploy prod secrets');
+      expect(bgText).not.toContain('SecretProject');
+      expect(bgText).not.toContain('ProdHost');
+      expect(bgText).not.toContain('sess-secret-1');
+      expect(bgText).not.toContain('Stale');
+
+      // Re-unlock on active, then transition to inactive and verify clearance again.
+      await ReactTestRenderer.act(async () => {
+        appState.emit('active');
+        await flushAsync();
+      });
+      expect(getAllText(renderer)).toContain('Private Build');
+
+      await ReactTestRenderer.act(async () => {
+        appState.emit('inactive');
+        await flushAsync();
+      });
+
+      const inactiveText = getAllText(renderer);
+      expect(
+        renderer.root.findByProps({ testID: 'dashboard-connection-status' })
+          .props.children,
+      ).toBe('Locked');
+      expect(
+        renderer.root.findAllByProps({ testID: 'dashboard-summary-card' }),
+      ).toHaveLength(0);
+      expect(inactiveText).not.toContain('Private Build');
+      expect(inactiveText).not.toContain('sess-secret-1');
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+      appState.restore();
+    }
+  });
+
+  test('S70-1 keeps session data cleared on cancelled, failed, or locked-out biometric unlock and repopulates only after BIOMETRIC_STRONG + sync succeed', async () => {
+    const appState = setupAppStateSpy();
+    mockConfiguredKeystore();
+    const request: jest.MockedFunction<HttpTransport['request']> = jest
+      .fn()
+      .mockResolvedValue({
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessions: [
+            makeSessionFixture({
+              id: 'sess-secret-2',
+              name: 'Confidential Session',
+              task: 'Rotate prod tokens',
+              status: 'needs_input',
+              project: { id: 'p2', name: 'ProjX' },
+              host: { id: 'h2', name: 'HostY' },
+            }),
+          ],
+        }),
+      });
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: false,
+    });
+    const cache = new SessionCredentialCache(true);
+
+    let renderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      renderer = ReactTestRenderer.create(
+        <DashboardScreen
+          onOpenSettings={jest.fn()}
+          onOpenSessions={jest.fn()}
+          onOpenSessionChat={jest.fn()}
+          apiClient={client}
+          credentialCache={cache}
+          allowDebugLoopback={false}
+        />,
+      );
+      await flushAsync();
+    });
+
+    try {
+      expect(getAllText(renderer)).toContain('Confidential Session');
+
+      await ReactTestRenderer.act(async () => {
+        appState.emit('background');
+        await flushAsync();
+      });
+
+      // Returning while user cancels Keystore prompt keeps screen locked with no session data.
+      keystore.readKey.mockRejectedValueOnce({ code: 'E_AUTH_CANCELED' });
+      await ReactTestRenderer.act(async () => {
+        appState.emit('active');
+        await flushAsync();
+      });
+      const cancelText = getAllText(renderer);
+      expect(
+        renderer.root.findByProps({ testID: 'dashboard-connection-status' })
+          .props.children,
+      ).toBe('Locked');
+      expect(
+        renderer.root.findAllByProps({ testID: 'dashboard-summary-card' }),
+      ).toHaveLength(0);
+      expect(cancelText).not.toContain('Confidential Session');
+      expect(cancelText).not.toContain('Rotate prod tokens');
+      expect(cancelText).not.toContain('ProjX');
+      expect(cancelText).not.toContain('HostY');
+      expect(cancelText).not.toContain('sess-secret-2');
+
+      // Explicit retry that fails with biometric lockout still exposes zero session data.
+      keystore.readKey.mockRejectedValueOnce({
+        code: 'E_BIOMETRIC_LOCKOUT',
+        message: 'Too many failed biometric attempts',
+      });
+      await ReactTestRenderer.act(async () => {
+        await renderer.root
+          .findByProps({ testID: 'dashboard-unlock-button' })
+          .props.onPress();
+        await flushAsync();
+      });
+      const lockoutText = getAllText(renderer);
+      expect(
+        renderer.root.findByProps({ testID: 'dashboard-connection-status' })
+          .props.children,
+      ).toBe('Locked');
+      expect(
+        renderer.root.findAllByProps({ testID: 'dashboard-summary-card' }),
+      ).toHaveLength(0);
+      expect(lockoutText).not.toContain('Confidential Session');
+      expect(lockoutText).not.toContain('sess-secret-2');
+
+      // Successful BIOMETRIC_STRONG unlock + HTTP 200 repopulates Dashboard cleanly.
+      keystore.readKey.mockResolvedValueOnce(TEST_KEY);
+      await ReactTestRenderer.act(async () => {
+        await renderer.root
+          .findByProps({ testID: 'dashboard-unlock-button' })
+          .props.onPress();
+        await flushAsync();
+      });
+      expect(
+        renderer.root.findByProps({ testID: 'dashboard-connection-status' })
+          .props.children,
+      ).toBe('Live');
+      expect(getAllText(renderer)).toContain('Confidential Session');
+      expect(getAllText(renderer)).toContain('sess-secret-2');
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+      appState.restore();
+    }
+  });
+
+  test('V70-1 clears Settings green test banner immediately on URL edit and on cross-origin Save rejection without key', async () => {
+    mockConfiguredKeystore();
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      retryAfter: null,
+      body: JSON.stringify({ apiVersion: 'v1', sessions: [] }),
+    });
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: false,
+    });
+    const cache = new SessionCredentialCache(false);
+
+    let settingsRenderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      settingsRenderer = ReactTestRenderer.create(
+        <SettingsScreen
+          apiClient={client}
+          credentialCache={cache}
+          allowDebugLoopback={false}
+        />,
+      );
+      await flushAsync();
+    });
+
+    try {
+      // 1. Test connection -> green banner appears.
+      await ReactTestRenderer.act(async () => {
+        await settingsRenderer.root
+          .findByProps({ testID: 'test-connection-button' })
+          .props.onPress();
+        await flushAsync();
+      });
+      expect(
+        settingsRenderer.root.findByProps({ testID: 'test-status-text' }).props
+          .children,
+      ).toContain('Connection succeeded (HTTP 200)');
+
+      // 2. Editing the URL input clears testBanner immediately before pressing Save.
+      await ReactTestRenderer.act(async () => {
+        settingsRenderer.root
+          .findByProps({ testID: 'server-url-input' })
+          .props.onChangeText('https://other-host.tailnet.ts.net:5770');
+      });
+      expect(
+        settingsRenderer.root.findAllByProps({ testID: 'test-status-banner' }),
+      ).toHaveLength(0);
+
+      // 3. Running Test connection while draft URL has another origin shows green banner,
+      //    and pressing Save / Replace (origin-change rejection without key) clears testBanner.
+      await ReactTestRenderer.act(async () => {
+        await settingsRenderer.root
+          .findByProps({ testID: 'test-connection-button' })
+          .props.onPress();
+        await flushAsync();
+      });
+      expect(
+        settingsRenderer.root.findByProps({ testID: 'test-status-text' }).props
+          .children,
+      ).toContain('Connection succeeded (HTTP 200)');
+
+      await ReactTestRenderer.act(async () => {
+        await settingsRenderer.root
+          .findByProps({ testID: 'save-settings-button' })
+          .props.onPress();
+        await flushAsync();
+      });
+      expect(
+        settingsRenderer.root.findByProps({ testID: 'save-status-text' }).props
+          .children,
+      ).toContain('Changing the server origin requires entering the API key again.');
+      expect(
+        settingsRenderer.root.findAllByProps({ testID: 'test-status-banner' }),
+      ).toHaveLength(0);
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        settingsRenderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test.each([429, 401] as const)(
+    'S70-1 clears session snapshot after cancelled Settings replacement during HTTP %s pause without violating pause or cooldown',
+    async status => {
+      mockConfiguredKeystore();
+      let currentTimeMs = 1_700_000_000_000;
+      const now = () => currentTimeMs;
+
+      const okResponse = {
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessions: [
+            makeSessionFixture({
+              id: 'sess-s70-pause-1',
+              name: 'PrivateName',
+              task: 'PrivateTask',
+              project: { id: 'p-priv', name: 'PrivateProject' },
+              host: { id: 'h-priv', name: 'PrivateHost' },
+            }),
+          ],
+        }),
+      };
+
+      const request = jest
+        .fn()
+        .mockResolvedValueOnce(okResponse)
+        .mockResolvedValueOnce({
+          status,
+          retryAfter: status === 429 ? '30' : null,
+          body: '',
+        })
+        .mockResolvedValueOnce(okResponse);
+
+      const client = new SpawneaApiClient({
+        transport: { request },
+        allowDebugLoopback: false,
+        now,
+      });
+      const cache = new SessionCredentialCache(false);
+
+      const listeners = new Map<'focus' | 'blur', Set<() => void>>();
+      let focused = true;
+      const dashNav = {
+        isFocused: () => focused,
+        addListener: jest.fn((event: 'focus' | 'blur', cb: () => void) => {
+          if (!listeners.has(event)) {
+            listeners.set(event, new Set());
+          }
+          listeners.get(event)?.add(cb);
+          return () => {
+            listeners.get(event)?.delete(cb);
+          };
+        }),
+      };
+      const emitDashNav = (event: 'focus' | 'blur') => {
+        focused = event === 'focus';
+        listeners.get(event)?.forEach(cb => cb());
+      };
+
+      let dashRenderer!: ReactTestRenderer.ReactTestRenderer;
+      let settingsRenderer!: ReactTestRenderer.ReactTestRenderer;
+      await ReactTestRenderer.act(async () => {
+        dashRenderer = ReactTestRenderer.create(
+          <NavigationContext.Provider value={dashNav as never}>
+            <DashboardScreen
+              onOpenSettings={jest.fn()}
+              onOpenSessions={jest.fn()}
+              onOpenSessionChat={jest.fn()}
+              apiClient={client}
+              credentialCache={cache}
+              allowDebugLoopback={false}
+              now={now}
+            />
+          </NavigationContext.Provider>,
+        );
+        settingsRenderer = ReactTestRenderer.create(
+          <SettingsScreen
+            apiClient={client}
+            credentialCache={cache}
+            allowDebugLoopback={false}
+          />,
+        );
+        await flushAsync();
+      });
+
+      try {
+        expect(getAllText(dashRenderer)).toContain('PrivateName');
+        expect(keystore.readKey).toHaveBeenCalledTimes(1);
+
+        // Unlocked refresh receives 429/401 -> stays stale while foreground cache is still valid.
+        await ReactTestRenderer.act(async () => {
+          dashRenderer.root
+            .findByProps({ testID: 'dashboard-refresh-button' })
+            .props.onPress();
+          await flushAsync();
+        });
+        expect(
+          dashRenderer.root.findByProps({
+            testID: 'dashboard-connection-status',
+          }).props.children,
+        ).toContain('Stale');
+        expect(getAllText(dashRenderer)).toContain('PrivateName');
+
+        // Navigate to Settings (blur Dashboard), start key replacement and cancel it -> clears cache.
+        await ReactTestRenderer.act(async () => {
+          emitDashNav('blur');
+          settingsRenderer.root
+            .findByProps({ testID: 'api-key-input' })
+            .props.onChangeText('synthetic-replacement');
+          await flushAsync();
+        });
+        keystore.saveCredentials.mockRejectedValueOnce({
+          code: 'E_AUTH_CANCELED',
+        });
+        await ReactTestRenderer.act(async () => {
+          await settingsRenderer.root
+            .findByProps({ testID: 'save-settings-button' })
+            .props.onPress();
+          await flushAsync();
+        });
+        expect(cache.getCachedCredentials(client)).toBeNull();
+
+        // Return focus to Dashboard during 429 cooldown / 401 pause:
+        // must clear snapshot data and honor pause/cooldown without premature HTTP or biometric prompt.
+        await ReactTestRenderer.act(async () => {
+          emitDashNav('focus');
+          await flushAsync();
+        });
+        expect(cache.getCachedCredentials(client)).toBeNull();
+        expect(request).toHaveBeenCalledTimes(2);
+        expect(keystore.readKey).toHaveBeenCalledTimes(1);
+        expect(
+          dashRenderer.root.findByProps({
+            testID: 'dashboard-connection-status',
+          }).props.children,
+        ).toBe(
+          status === 429 ? 'Rate limited (HTTP 429)' : 'Auth rejected (HTTP 401)',
+        );
+        expect(
+          dashRenderer.root.findAllByProps({ testID: 'dashboard-summary-card' }),
+        ).toHaveLength(0);
+        const visibleAfterReturn = getAllText(dashRenderer);
+        for (const privateValue of [
+          'PrivateName',
+          'PrivateTask',
+          'PrivateProject',
+          'PrivateHost',
+          'sess-s70-pause-1',
+        ]) {
+          expect(visibleAfterReturn).not.toContain(privateValue);
+        }
+
+        currentTimeMs += 30000;
+        await ReactTestRenderer.act(async () => {
+          jest.advanceTimersByTime(30000);
+          await flushAsync();
+        });
+        if (status === 429) {
+          // Focus intent preserved across cooldown unlocks once and recovers Live.
+          expect(keystore.readKey).toHaveBeenCalledTimes(2);
+          expect(request).toHaveBeenCalledTimes(3);
+          expect(
+            dashRenderer.root.findByProps({
+              testID: 'dashboard-connection-status',
+            }).props.children,
+          ).toBe('Live');
+          expect(getAllText(dashRenderer)).toContain('PrivateName');
+        } else {
+          // 401 pause does not retry or prompt on timers.
+          expect(keystore.readKey).toHaveBeenCalledTimes(1);
+          expect(request).toHaveBeenCalledTimes(2);
+        }
+      } finally {
+        await ReactTestRenderer.act(async () => {
+          dashRenderer.unmount();
+          settingsRenderer.unmount();
+        });
+        cache.dispose();
+      }
+    },
+  );
 });

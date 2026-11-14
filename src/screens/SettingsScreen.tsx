@@ -168,6 +168,11 @@ export function SettingsScreen({
     }
   };
 
+  const handleServerUrlChange = (nextUrl: string) => {
+    setServerUrl(nextUrl);
+    setTestBanner(null);
+  };
+
   const handleSave = async () => {
     setBusyAction('save');
     setSaveBanner(null);
@@ -231,6 +236,7 @@ export function SettingsScreen({
           setApiKeyInput('');
           setHasSavedKey(existingState.hasKey);
           setIsIncomplete(existingState.incomplete);
+          setTestBanner(null);
           setSaveBanner({
             tone: 'error',
             message:
@@ -459,7 +465,7 @@ export function SettingsScreen({
         accessibilityLabel="Server URL"
         style={styles.input}
         value={serverUrl}
-        onChangeText={setServerUrl}
+        onChangeText={handleServerUrlChange}
         placeholder={
           effectiveAllowDebugLoopback
             ? 'https://machine.tailnet.ts.net or http://127.0.0.1:5757'

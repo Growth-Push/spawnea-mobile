@@ -205,34 +205,14 @@ export function DashboardScreen({
         return;
       }
 
-      if (lock.reason === 'auth_invalidated') {
-        snapshotRef.current = null;
-        setViewState({
-          status: 'locked',
-          reason: 'auth_invalidated',
-          message: lock.message,
-        });
-        return;
-      }
-
-      if (snapshotRef.current !== null) {
-        setClockMs(now());
-        setViewState({
-          status: 'stale',
-          snapshot: snapshotRef.current,
-          staleReason: lock.message,
-          errorKind: 'locked',
-          retryAfterSeconds: null,
-        });
-      } else {
-        setViewState({
-          status: 'locked',
-          reason: lock.reason,
-          message: lock.message,
-        });
-      }
+      snapshotRef.current = null;
+      setViewState({
+        status: 'locked',
+        reason: lock.reason,
+        message: lock.message,
+      });
     },
-    [clearPollTimer, now],
+    [clearPollTimer],
   );
 
   const schedulePoll = useCallback(
@@ -359,12 +339,20 @@ export function DashboardScreen({
         return;
       }
 
+      let credentials = credentialCache.getCachedCredentials(
+        apiClient,
+        normalizedUrl,
+      );
+      if (!credentials) {
+        snapshotRef.current = null;
+      }
+
       if (trigger !== 'manual' && apiClient.isPollingPausedForAuth()) {
         pendingCooldownTriggerRef.current = null;
         const message = formatApiErrorMessage('polling_paused_auth', 401, null);
         const currentNowMs = now();
         setClockMs(currentNowMs);
-        if (snapshotRef.current !== null) {
+        if (credentials && snapshotRef.current !== null) {
           setViewState({
             status: 'stale',
             snapshot: snapshotRef.current,
@@ -373,6 +361,7 @@ export function DashboardScreen({
             retryAfterSeconds: null,
           });
         } else {
+          snapshotRef.current = null;
           setViewState({
             status: 'error',
             error: {
@@ -397,7 +386,7 @@ export function DashboardScreen({
         );
         const currentNowMs = now();
         setClockMs(currentNowMs);
-        if (snapshotRef.current !== null) {
+        if (credentials && snapshotRef.current !== null) {
           setViewState({
             status: 'stale',
             snapshot: snapshotRef.current,
@@ -406,6 +395,7 @@ export function DashboardScreen({
             retryAfterSeconds: cooldownSeconds,
           });
         } else {
+          snapshotRef.current = null;
           setViewState({
             status: 'error',
             error: {
@@ -431,31 +421,16 @@ export function DashboardScreen({
 
       pendingCooldownTriggerRef.current = null;
 
-      let credentials = credentialCache.getCachedCredentials(
-        apiClient,
-        normalizedUrl,
-      );
-
       if (!credentials) {
+        snapshotRef.current = null;
         if (trigger === 'poll' || autoUnlockDeclinedRef.current) {
           const message =
             'Fingerprint unlock is required to access your saved API key.';
-          if (snapshotRef.current !== null) {
-            setClockMs(now());
-            setViewState({
-              status: 'stale',
-              snapshot: snapshotRef.current,
-              staleReason: message,
-              errorKind: 'locked',
-              retryAfterSeconds: null,
-            });
-          } else {
-            setViewState({
-              status: 'locked',
-              reason: 'unlock_required',
-              message,
-            });
-          }
+          setViewState({
+            status: 'locked',
+            reason: 'unlock_required',
+            message,
+          });
           return;
         }
 
@@ -480,12 +455,12 @@ export function DashboardScreen({
           }
 
           if (!unlockResult.ok) {
+            snapshotRef.current = null;
             if (
               unlockResult.reason === 'not_configured' ||
               unlockResult.reason === 'incomplete_config' ||
               unlockResult.reason === 'invalid_url'
             ) {
-              snapshotRef.current = null;
               setViewState({
                 status: 'not_configured',
                 reason: unlockResult.reason,
@@ -494,45 +469,13 @@ export function DashboardScreen({
               return;
             }
 
-            if (unlockResult.reason === 'auth_invalidated') {
-              snapshotRef.current = null;
-              autoUnlockDeclinedRef.current = true;
-              setViewState({
-                status: 'locked',
-                reason: 'auth_invalidated',
-                message: unlockResult.message,
-              });
-              return;
-            }
-
-            if (unlockResult.reason === 'credential_changed') {
-              snapshotRef.current = null;
-              autoUnlockDeclinedRef.current = false;
-              setViewState({
-                status: 'locked',
-                reason: 'credential_changed',
-                message: unlockResult.message,
-              });
-              return;
-            }
-
-            autoUnlockDeclinedRef.current = true;
-            if (snapshotRef.current !== null) {
-              setClockMs(now());
-              setViewState({
-                status: 'stale',
-                snapshot: snapshotRef.current,
-                staleReason: unlockResult.message,
-                errorKind: 'locked',
-                retryAfterSeconds: null,
-              });
-            } else {
-              setViewState({
-                status: 'locked',
-                reason: unlockResult.reason,
-                message: unlockResult.message,
-              });
-            }
+            autoUnlockDeclinedRef.current =
+              unlockResult.reason !== 'credential_changed';
+            setViewState({
+              status: 'locked',
+              reason: unlockResult.reason,
+              message: unlockResult.message,
+            });
             return;
           }
 
@@ -574,6 +517,19 @@ export function DashboardScreen({
             serverUrl: normalizedUrl,
             credentialGeneration: generationAtStart,
           };
+          const hasValidCreds =
+            credentialCache.getCachedCredentials(apiClient, normalizedUrl) !==
+            null;
+          if (!hasValidCreds) {
+            snapshotRef.current = null;
+            setViewState({
+              status: 'locked',
+              reason: 'unlock_required',
+              message:
+                'Fingerprint unlock is required to access your saved API key.',
+            });
+            return;
+          }
           snapshotRef.current = nextSnapshot;
           setViewState(
             nextSnapshot.sessions.length === 0
@@ -595,7 +551,13 @@ export function DashboardScreen({
           return;
         }
 
-        if (snapshotRef.current !== null) {
+        const hasValidCreds =
+          credentialCache.getCachedCredentials(apiClient, normalizedUrl) !==
+          null;
+        if (!hasValidCreds) {
+          snapshotRef.current = null;
+        }
+        if (hasValidCreds && snapshotRef.current !== null) {
           setViewState({
             status: 'stale',
             snapshot: snapshotRef.current,
@@ -663,6 +625,27 @@ export function DashboardScreen({
         }
       },
     );
+    const unsubscribeCacheCleared = credentialCache.onCleared(() => {
+      if (!mountedRef.current) {
+        return;
+      }
+      snapshotRef.current = null;
+      if (credentialCache.getTerminalAuthLock() !== null) {
+        return;
+      }
+      setViewState(prev =>
+        prev.status === 'live' ||
+        prev.status === 'empty' ||
+        prev.status === 'stale'
+          ? {
+              status: 'locked',
+              reason: 'unlock_required',
+              message:
+                'Fingerprint unlock is required to access your saved API key.',
+            }
+          : prev,
+      );
+    });
 
     if (isFocusedRef.current && appActiveRef.current) {
       runSync('focus').catch(() => undefined);
@@ -703,28 +686,17 @@ export function DashboardScreen({
         setIsBackgroundRefreshing(false);
         credentialCache.clear();
         autoUnlockDeclinedRef.current = false;
-        if (snapshotRef.current !== null) {
-          setClockMs(now());
-          setViewState({
-            status: 'stale',
-            snapshot: snapshotRef.current,
-            staleReason:
-              'Session locked when app left foreground. Unlock with your fingerprint to resume live updates.',
-            errorKind: 'locked',
-            retryAfterSeconds: null,
-          });
-        } else {
-          setViewState(prev =>
-            prev.status === 'not_configured'
-              ? prev
-              : {
-                  status: 'locked',
-                  reason: 'backgrounded',
-                  message:
-                    'Unlock with your fingerprint to load live sessions.',
-                },
-          );
-        }
+        snapshotRef.current = null;
+        setViewState(prev =>
+          prev.status === 'not_configured'
+            ? prev
+            : {
+                status: 'locked',
+                reason: 'backgrounded',
+                message:
+                  'Unlock with your fingerprint to load live sessions.',
+              },
+        );
         return;
       }
 
@@ -744,6 +716,7 @@ export function DashboardScreen({
       pendingCooldownTriggerRef.current = null;
       unsubscribeTerminalAuth();
       unsubscribeTerminalCleared();
+      unsubscribeCacheCleared();
       unsubscribeFocus?.();
       unsubscribeBlur?.();
       appStateSub?.remove?.();
@@ -758,9 +731,13 @@ export function DashboardScreen({
   ]);
 
   const activeSnapshot =
-    viewState.status === 'live' ||
-    viewState.status === 'empty' ||
-    viewState.status === 'stale'
+    (viewState.status === 'live' ||
+      viewState.status === 'empty' ||
+      viewState.status === 'stale') &&
+    credentialCache.getCachedCredentials(
+      apiClient,
+      viewState.snapshot.serverUrl,
+    ) !== null
       ? viewState.snapshot
       : null;
 
