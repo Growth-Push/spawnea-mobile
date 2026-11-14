@@ -2,12 +2,12 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { NavigationContext } from '@react-navigation/native';
 import React from 'react';
 import { AppState, NativeModules, RefreshControl, Text } from 'react-native';
+import { SafeAreaInsetsContext } from 'react-native-safe-area-context';
 import ReactTestRenderer from 'react-test-renderer';
 import App from '../App';
 import { HttpTransport, SpawneaApiClient } from '../src/api/client';
 import {
-  computeStatusSummary,
-  formatAgeDuration,
+  computeDistributionSummary,
   mapApiFailureToDashboardError,
   partitionDashboardSessions,
   sortDashboardSessions,
@@ -101,32 +101,50 @@ function mockConfiguredKeystore(serverUrl = TEST_URL, apiKey = TEST_KEY) {
 }
 
 describe('dashboardModel pure helpers', () => {
-  test('computeStatusSummary derives counts strictly from API status strings', () => {
+  test('computeDistributionSummary maps all 7 canonical statuses into 4 categories with total equal to sum', () => {
     const fixtures = [
       makeSessionFixture({ id: 'sess-1', status: 'needs_input' }),
       makeSessionFixture({ id: 'sess-2', status: 'working' }),
-      makeSessionFixture({ id: 'sess-3', status: 'working' }),
+      makeSessionFixture({ id: 'sess-3', status: 'starting' }),
       makeSessionFixture({ id: 'sess-4', status: 'idle' }),
-      makeSessionFixture({ id: 'sess-5', status: 'error' }),
-      makeSessionFixture({ id: 'sess-6', status: 'disconnected' }),
-      makeSessionFixture({ id: 'sess-7', status: 'custom_backend_state' }),
+      makeSessionFixture({ id: 'sess-5', status: 'done' }),
+      makeSessionFixture({ id: 'sess-6', status: 'error' }),
+      makeSessionFixture({ id: 'sess-7', status: 'disconnected' }),
     ];
 
-    const summary = computeStatusSummary(fixtures);
+    const summary = computeDistributionSummary(fixtures);
     expect(summary.total).toBe(7);
 
-    const byStatus = Object.fromEntries(
-      summary.counts.map(item => [item.status, item.count]),
+    const byCategory = Object.fromEntries(
+      summary.categories.map(item => [item.category, item.count]),
     );
-    expect(byStatus).toEqual({
-      needs_input: 1,
-      working: 2,
-      starting: 0,
-      idle: 1,
-      done: 0,
-      error: 1,
-      disconnected: 1,
-      custom_backend_state: 1,
+    expect(byCategory).toEqual({
+      'need-input': 1,
+      running: 2,
+      'done/idle': 2,
+      error: 2,
+    });
+    const sum = summary.categories.reduce((acc, item) => acc + item.count, 0);
+    expect(sum).toBe(summary.total);
+  });
+
+  test('computeDistributionSummary counts unrecognized backend statuses separately without adding a fifth category', () => {
+    const fixtures = [
+      makeSessionFixture({ id: 'sess-1', status: 'idle' }),
+      makeSessionFixture({ id: 'sess-2', status: 'custom_backend_state' }),
+    ];
+
+    const summary = computeDistributionSummary(fixtures);
+    expect(summary.total).toBe(2);
+    expect(summary.unknownCount).toBe(1);
+    expect(summary.categories).toHaveLength(4);
+    expect(
+      Object.fromEntries(summary.categories.map(c => [c.category, c.count])),
+    ).toEqual({
+      'need-input': 0,
+      running: 0,
+      'done/idle': 1,
+      error: 0,
     });
   });
 
@@ -231,14 +249,6 @@ describe('dashboardModel pure helpers', () => {
         }).kind,
       ).toBe('server_error');
     }
-  });
-
-  test('formatAgeDuration formats seconds, minutes, and hours deterministically', () => {
-    expect(formatAgeDuration(0)).toBe('0s');
-    expect(formatAgeDuration(14900)).toBe('14s');
-    expect(formatAgeDuration(65000)).toBe('1m 5s');
-    expect(formatAgeDuration(120000)).toBe('2m');
-    expect(formatAgeDuration(3780000)).toBe('1h 3m');
   });
 });
 
@@ -551,7 +561,7 @@ describe('DashboardScreen', () => {
     }
   });
 
-  test('emphasizes needs_input sessions at top, shows host/project, and opens Session/Chat with ID', async () => {
+  test('emphasizes needs_input sessions at top, shows host/harness/branch without visible ID, and opens Session/Chat with ID', async () => {
     mockConfiguredKeystore();
     const request = jest.fn().mockResolvedValue({
       status: 200,
@@ -566,6 +576,8 @@ describe('DashboardScreen', () => {
             status: 'idle',
             project: { id: 'p-1', name: 'Project Alpha' },
             host: { id: 'h-1', name: 'Host One' },
+            harness: { id: 'h-codex', name: 'Codex CLI', command: 'codex' },
+            worktree: { branch: 'chore/checks' },
             lastActivityAt: '2026-11-13T12:10:00.000Z',
           }),
           makeSessionFixture({
@@ -575,6 +587,8 @@ describe('DashboardScreen', () => {
             status: 'needs_input',
             project: { id: 'p-2', name: 'Project Beta' },
             host: { id: 'h-2', name: 'Host Two' },
+            harness: { id: 'h-claude', name: 'Claude Code', command: 'claude' },
+            worktree: { branch: 'feat/deploy' },
             lastActivityAt: '2026-11-13T12:05:00.000Z',
           }),
         ],
@@ -614,11 +628,18 @@ describe('DashboardScreen', () => {
             : String(node.props.children ?? ''),
         )
         .join('\n');
-      expect(needsInputText).toContain('sess-input-a');
+      expect(needsInputText).toContain('Approve Deployment');
+      expect(needsInputText).not.toContain('sess-input-a');
 
       const text = getAllText(renderer);
-      expect(text).toContain('Project: Project Beta · Host: Host Two');
-      expect(text).toContain('Project: Project Alpha · Host: Host One');
+      expect(text).toContain('Host Two');
+      expect(text).toContain('Claude Code');
+      expect(text).toContain('feat/deploy');
+      expect(text).toContain('Host One');
+      expect(text).toContain('Codex CLI');
+      expect(text).toContain('chore/checks');
+      expect(text).not.toContain('sess-input-a');
+      expect(text).not.toContain('sess-idle-a');
       expect(text.indexOf('Approve Deployment')).toBeLessThan(
         text.indexOf('Idle Worker'),
       );
@@ -636,7 +657,7 @@ describe('DashboardScreen', () => {
     }
   });
 
-  test('transitions to stale with age on refresh failure, never replaces with empty list, and recovers on pull-to-refresh', async () => {
+  test('transitions to stale without timestamps or age on refresh failure, never replaces with empty list, and recovers on pull-to-refresh', async () => {
     mockConfiguredKeystore();
     let currentTimeMs = 1_700_000_000_000;
     const now = () => currentTimeMs;
@@ -704,7 +725,7 @@ describe('DashboardScreen', () => {
       ).toBe('Live');
       expect(keystore.readKey).toHaveBeenCalledTimes(1);
 
-      // Next poll fails with offline error -> becomes STALE, keeps sess-live-1.
+      // Next poll fails with offline error -> becomes STALE, keeps Build Monitor without exposing ID or age.
       currentTimeMs += 10000;
       await ReactTestRenderer.act(async () => {
         jest.advanceTimersByTime(10000);
@@ -719,19 +740,12 @@ describe('DashboardScreen', () => {
       expect(
         renderer.root.findByProps({ testID: 'dashboard-stale-banner' }),
       ).toBeDefined();
-      expect(getAllText(renderer)).toContain('sess-live-1');
-
-      // Advancing clock increases the displayed stale age without hitting empty state.
-      currentTimeMs += 5000;
-      await ReactTestRenderer.act(async () => {
-        jest.advanceTimersByTime(5000);
-        await flushAsync();
-      });
-      expect(
-        renderer.root
-          .findByProps({ testID: 'dashboard-stale-age' })
-          .props.children.join(''),
-      ).toContain('Age: 15s');
+      const staleText = getAllText(renderer);
+      expect(staleText).toContain('Build Monitor');
+      expect(staleText).toContain('Not live');
+      expect(staleText).not.toContain('Age:');
+      expect(staleText).not.toContain('Last successful update');
+      expect(staleText).not.toContain('sess-live-1');
 
       // Manual pull-to-refresh recovers back to Live without re-prompting biometrics.
       const scroll = renderer.root.findByProps({ testID: 'dashboard-screen' });
@@ -954,10 +968,13 @@ describe('DashboardScreen', () => {
       });
       expect(request).toHaveBeenCalledTimes(1);
 
+      const scroll = renderer.root.findByProps({ testID: 'dashboard-screen' });
+      const refreshControl = scroll.props
+        .refreshControl as React.ReactElement<
+        React.ComponentProps<typeof RefreshControl>
+      >;
       await ReactTestRenderer.act(async () => {
-        await renderer.root
-          .findByProps({ testID: 'dashboard-refresh-button' })
-          .props.onPress();
+        refreshControl.props.onRefresh?.();
         await flushAsync();
       });
       expect(request).toHaveBeenCalledTimes(1);
@@ -1207,7 +1224,8 @@ describe('DashboardScreen', () => {
         renderer.root.findByProps({ testID: 'dashboard-connection-status' })
           .props.children,
       ).toBe('Stale · Auth rejected');
-      expect(getAllText(renderer)).toContain('sess-stale-401');
+      expect(getAllText(renderer)).toContain('Active Task');
+      expect(getAllText(renderer)).not.toContain('sess-stale-401');
       expect(client.isPollingPausedForAuth()).toBe(true);
 
       await ReactTestRenderer.act(async () => {
@@ -1217,12 +1235,8 @@ describe('DashboardScreen', () => {
       expect(request).toHaveBeenCalledTimes(2);
 
       renderer.root
-        .findByProps({ testID: 'dashboard-open-sessions-button' })
+        .findByProps({ testID: 'dashboard-stale-settings-button' })
         .props.onPress();
-      renderer.root
-        .findByProps({ testID: 'dashboard-open-settings-button' })
-        .props.onPress();
-      expect(onOpenSessions).toHaveBeenCalledTimes(1);
       expect(onOpenSettings).toHaveBeenCalledTimes(1);
     } finally {
       await ReactTestRenderer.act(async () => {
@@ -1232,7 +1246,7 @@ describe('DashboardScreen', () => {
     }
   });
 
-  test('resets Refresh button state when blurred while a 401 refresh is in flight', async () => {
+  test('resets pull-to-refresh refreshing state when blurred while a 401 refresh is in flight', async () => {
     mockConfiguredKeystore();
     let resolveDeferred!: (resp: {
       status: number;
@@ -1299,26 +1313,26 @@ describe('DashboardScreen', () => {
     });
 
     try {
-      const refreshButton = renderer.root.findByProps({
-        testID: 'dashboard-refresh-button',
-      });
-      expect(refreshButton.props.disabled).toBe(false);
+      const getRefreshControl = () =>
+        renderer.root.findByProps({ testID: 'dashboard-screen' }).props
+          .refreshControl as React.ReactElement<
+          React.ComponentProps<typeof RefreshControl>
+        >;
+      expect(getRefreshControl().props.refreshing).toBe(false);
 
-      // Start manual refresh, then blur before the pending request resolves 401.
+      // Start manual pull-to-refresh, then blur before the pending request resolves 401.
       await ReactTestRenderer.act(async () => {
-        refreshButton.props.onPress();
+        getRefreshControl().props.onRefresh?.();
         await flushAsync(2);
       });
       expect(request).toHaveBeenCalledTimes(2);
+      expect(getRefreshControl().props.refreshing).toBe(true);
 
       await ReactTestRenderer.act(async () => {
         emitNav('blur');
         await flushAsync(2);
       });
-      expect(
-        renderer.root.findByProps({ testID: 'dashboard-refresh-button' }).props
-          .disabled,
-      ).toBe(false);
+      expect(getRefreshControl().props.refreshing).toBe(false);
 
       await ReactTestRenderer.act(async () => {
         resolveDeferred({
@@ -1333,10 +1347,7 @@ describe('DashboardScreen', () => {
         emitNav('focus');
         await flushAsync();
       });
-      expect(
-        renderer.root.findByProps({ testID: 'dashboard-refresh-button' }).props
-          .disabled,
-      ).toBe(false);
+      expect(getRefreshControl().props.refreshing).toBe(false);
     } finally {
       await ReactTestRenderer.act(async () => {
         renderer.unmount();
@@ -1391,10 +1402,13 @@ describe('DashboardScreen', () => {
       ).toHaveLength(0);
 
       currentTimeMs += 8000;
+      const scroll = renderer.root.findByProps({ testID: 'dashboard-screen' });
+      const refreshControl = scroll.props
+        .refreshControl as React.ReactElement<
+        React.ComponentProps<typeof RefreshControl>
+      >;
       await ReactTestRenderer.act(async () => {
-        renderer.root
-          .findByProps({ testID: 'dashboard-refresh-button' })
-          .props.onPress();
+        refreshControl.props.onRefresh?.();
         await flushAsync();
       });
 
@@ -1405,10 +1419,12 @@ describe('DashboardScreen', () => {
         renderer.root.findByProps({ testID: 'dashboard-stale-empty-card' }),
       ).toBeDefined();
       expect(getAllText(renderer)).toContain(
-        '0 sessions (last known · current state unknown)',
+        '0 sessions (last known · not live)',
       );
+      expect(getAllText(renderer)).not.toContain('Age:');
+      expect(getAllText(renderer)).not.toContain('Last successful update');
       expect(getAllText(renderer)).not.toContain(
-        'No sessions are currently reported by this server.',
+        'No sessions are currently reported by this Spawnea server.',
       );
     } finally {
       await ReactTestRenderer.act(async () => {
@@ -1488,14 +1504,14 @@ describe('DashboardScreen', () => {
       });
       expect(request).toHaveBeenCalledTimes(1);
 
-      // Even a manual refresh retry while still locked makes zero HTTP requests.
+      // Even a manual unlock retry while still locked makes zero HTTP requests.
       keystore.readKey.mockRejectedValueOnce({
         code: 'E_BIOMETRIC_LOCKOUT',
         message: 'Too many failed biometric attempts',
       });
       await ReactTestRenderer.act(async () => {
         dashRenderer.root
-          .findByProps({ testID: 'dashboard-refresh-button' })
+          .findByProps({ testID: 'dashboard-unlock-button' })
           .props.onPress();
         await flushAsync();
       });
@@ -1505,7 +1521,7 @@ describe('DashboardScreen', () => {
       keystore.readKey.mockResolvedValueOnce(TEST_KEY);
       await ReactTestRenderer.act(async () => {
         dashRenderer.root
-          .findByProps({ testID: 'dashboard-refresh-button' })
+          .findByProps({ testID: 'dashboard-unlock-button' })
           .props.onPress();
         await flushAsync();
       });
@@ -1647,9 +1663,9 @@ describe('DashboardScreen', () => {
 
   test.each([
     ['empty', []],
-    ['live', [makeSessionFixture({ id: 'sess-age-1', status: 'working' })]],
+    ['live', [makeSessionFixture({ id: 'sess-age-1', name: 'Live Worker', status: 'working' })]],
   ])(
-    'J70-5 advances relative age in %s state while focused and active even with a pending poll',
+    'J70-5 omits timestamps, age, and technical panel in %s state while continuing foreground polling',
     async (_label, sessions) => {
       jest.setSystemTime(new Date('2026-11-14T12:00:00Z'));
       mockConfiguredKeystore();
@@ -1684,33 +1700,35 @@ describe('DashboardScreen', () => {
       });
 
       try {
-        const lastUpdatedText = () =>
-          renderer.root
-            .findByProps({ testID: 'dashboard-last-updated' })
-            .props.children.join('');
-
         expect(
           renderer.root.findByProps({ testID: 'dashboard-connection-status' })
             .props.children,
         ).toBe('Live');
-        expect(lastUpdatedText()).toContain('(0s ago)');
+        expect(
+          renderer.root.findAllByProps({ testID: 'dashboard-last-updated' }),
+        ).toHaveLength(0);
+        expect(
+          renderer.root.findAllByProps({ testID: 'dashboard-server-url' }),
+        ).toHaveLength(0);
+        expect(
+          renderer.root.findAllByProps({ testID: 'dashboard-refresh-button' }),
+        ).toHaveLength(0);
+
+        const initialText = getAllText(renderer);
+        expect(initialText).not.toContain('Last successful update');
+        expect(initialText).not.toContain('Server:');
+        expect(initialText).not.toContain('ago)');
 
         await ReactTestRenderer.act(async () => {
           jest.advanceTimersByTime(10000);
           await flushAsync();
         });
         expect(request).toHaveBeenCalledTimes(2);
-        expect(lastUpdatedText()).toContain('(10s ago)');
-
-        await ReactTestRenderer.act(async () => {
-          jest.advanceTimersByTime(10000);
-          await flushAsync();
-        });
+        expect(getAllText(renderer)).not.toContain('10s ago');
         expect(
           renderer.root.findByProps({ testID: 'dashboard-connection-status' })
             .props.children,
         ).toBe('Live');
-        expect(lastUpdatedText()).toContain('(20s ago)');
       } finally {
         await ReactTestRenderer.act(async () => {
           renderer.unmount();
@@ -1726,7 +1744,7 @@ describe('DashboardScreen', () => {
     let currentTimeMs = 1_700_000_000_000;
     const now = () => currentTimeMs;
 
-    const request = jest
+      const request = jest
       .fn()
       .mockResolvedValueOnce({
         status: 429,
@@ -1738,7 +1756,12 @@ describe('DashboardScreen', () => {
         retryAfter: null,
         body: JSON.stringify({
           apiVersion: 'v1',
-          sessions: [makeSessionFixture({ id: 'sess-429-resume' })],
+          sessions: [
+            makeSessionFixture({
+              id: 'sess-429-resume',
+              name: 'Resumed Session',
+            }),
+          ],
         }),
       });
 
@@ -1807,7 +1830,8 @@ describe('DashboardScreen', () => {
         renderer.root.findByProps({ testID: 'dashboard-connection-status' })
           .props.children,
       ).toBe('Live');
-      expect(getAllText(renderer)).toContain('sess-429-resume');
+      expect(getAllText(renderer)).toContain('Resumed Session');
+      expect(getAllText(renderer)).not.toContain('sess-429-resume');
 
       // Passive poll with cleared cache must never prompt for biometrics.
       await ReactTestRenderer.act(async () => {
@@ -1825,6 +1849,7 @@ describe('DashboardScreen', () => {
         renderer.root.findByProps({ testID: 'dashboard-connection-status' })
           .props.children,
       ).toBe('Locked');
+      expect(getAllText(renderer)).not.toContain('Resumed Session');
       expect(getAllText(renderer)).not.toContain('sess-429-resume');
     } finally {
       await ReactTestRenderer.act(async () => {
@@ -2011,7 +2036,8 @@ describe('DashboardScreen', () => {
 
     try {
       expect(getAllText(renderer)).toContain('Private Build');
-      expect(getAllText(renderer)).toContain('sess-secret-1');
+      expect(getAllText(renderer)).toContain('ProdHost');
+      expect(getAllText(renderer)).not.toContain('sess-secret-1');
 
       await ReactTestRenderer.act(async () => {
         appState.emit('background');
@@ -2173,7 +2199,8 @@ describe('DashboardScreen', () => {
           .props.children,
       ).toBe('Live');
       expect(getAllText(renderer)).toContain('Confidential Session');
-      expect(getAllText(renderer)).toContain('sess-secret-2');
+      expect(getAllText(renderer)).toContain('Rotate prod tokens');
+      expect(getAllText(renderer)).not.toContain('sess-secret-2');
     } finally {
       await ReactTestRenderer.act(async () => {
         renderer.unmount();
@@ -2355,11 +2382,16 @@ describe('DashboardScreen', () => {
         expect(getAllText(dashRenderer)).toContain('PrivateName');
         expect(keystore.readKey).toHaveBeenCalledTimes(1);
 
-        // Unlocked refresh receives 429/401 -> stays stale while foreground cache is still valid.
+        // Unlocked pull-to-refresh receives 429/401 -> stays stale while foreground cache is still valid.
+        const scroll = dashRenderer.root.findByProps({
+          testID: 'dashboard-screen',
+        });
+        const refreshControl = scroll.props
+          .refreshControl as React.ReactElement<
+          React.ComponentProps<typeof RefreshControl>
+        >;
         await ReactTestRenderer.act(async () => {
-          dashRenderer.root
-            .findByProps({ testID: 'dashboard-refresh-button' })
-            .props.onPress();
+          refreshControl.props.onRefresh?.();
           await flushAsync();
         });
         expect(
@@ -2447,6 +2479,740 @@ describe('DashboardScreen', () => {
       }
     },
   );
+
+  test('renders segmented distribution bar omitting zero-count segments, single legend row, and hides Needs input when count is 0', async () => {
+    mockConfiguredKeystore();
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      retryAfter: null,
+      body: JSON.stringify({
+        apiVersion: 'v1',
+        sessions: [
+          makeSessionFixture({ id: 'sess-w-1', name: 'Worker One', status: 'working' }),
+          makeSessionFixture({ id: 'sess-s-1', name: 'Starting One', status: 'starting' }),
+          makeSessionFixture({ id: 'sess-i-1', name: 'Idle One', status: 'idle' }),
+          makeSessionFixture({ id: 'sess-d-1', name: 'Done One', status: 'done' }),
+        ],
+      }),
+    });
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: false,
+    });
+    const cache = new SessionCredentialCache(false);
+
+    let renderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      renderer = ReactTestRenderer.create(
+        <DashboardScreen
+          onOpenSettings={jest.fn()}
+          onOpenSessions={jest.fn()}
+          onOpenSessionChat={jest.fn()}
+          apiClient={client}
+          credentialCache={cache}
+          allowDebugLoopback={false}
+        />,
+      );
+      await flushAsync();
+    });
+
+    try {
+      expect(
+        renderer.root
+          .findByProps({ testID: 'dashboard-total-sessions' })
+          .props.children.join(''),
+      ).toBe('Total: 4');
+
+      // Zero-count segments ('need-input' and 'error') must not render in the bar.
+      expect(
+        renderer.root.findAllByProps({ testID: 'dashboard-bar-segment-need-input' }),
+      ).toHaveLength(0);
+      expect(
+        renderer.root.findAllByProps({ testID: 'dashboard-bar-segment-error' }),
+      ).toHaveLength(0);
+      expect(
+        renderer.root.findByProps({ testID: 'dashboard-bar-segment-running' }),
+      ).toBeDefined();
+      expect(
+        renderer.root.findByProps({ testID: 'dashboard-bar-segment-done/idle' }),
+      ).toBeDefined();
+
+      // Legend renders all 4 categories with exact counts.
+      expect(
+        renderer.root
+          .findByProps({ testID: 'dashboard-legend-need-input' })
+          .props.children.join(''),
+      ).toBe('0 Need input');
+      expect(
+        renderer.root
+          .findByProps({ testID: 'dashboard-legend-running' })
+          .props.children.join(''),
+      ).toBe('2 Running');
+      expect(
+        renderer.root
+          .findByProps({ testID: 'dashboard-legend-done/idle' })
+          .props.children.join(''),
+      ).toBe('2 Done/idle');
+      expect(
+        renderer.root
+          .findByProps({ testID: 'dashboard-legend-error' })
+          .props.children.join(''),
+      ).toBe('0 Error');
+
+      // Needs input section is completely absent when 0 pending.
+      expect(
+        renderer.root.findAllByProps({ testID: 'dashboard-needs-input-section' }),
+      ).toHaveLength(0);
+      const text = getAllText(renderer);
+      expect(text).not.toContain('Needs input (0)');
+      expect(text).not.toContain('0 sessions with status needs_input');
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('renders host/harness/branch/children metadata from data, avoids top-level child duplication, hides IDs and worktree.path', async () => {
+    mockConfiguredKeystore();
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      retryAfter: null,
+      body: JSON.stringify({
+        apiVersion: 'v1',
+        sessions: [
+          {
+            ...makeSessionFixture({
+              id: 'sess-parent-secret-id',
+              name: 'Coordinator Session',
+              task: 'Coordinator Session',
+              status: 'idle',
+              host: { id: 'local', name: 'Workstation Alpha' },
+              harness: { id: 'local:claude', name: 'Claude Opus', command: 'claude' },
+            }),
+            worktree: {
+              managed: true,
+              branch: 'feat/ui-polish',
+              path: '/mnt/secret-host-path/worktrees/ops-70',
+            },
+          },
+          {
+            ...makeSessionFixture({
+              id: 'sess-child-1-secret-id',
+              name: 'Child Builder',
+              parentSessionId: 'sess-parent-secret-id',
+              childAlias: 'child-1',
+              task: 'Build UI cards',
+              status: 'working',
+              host: { id: 'local', name: 'Workstation Alpha' },
+              harness: { id: 'local:agy', name: 'Antigravity', command: 'agy' },
+            }),
+            worktree: {
+              branch: 'feat/ui-polish',
+              path: '/mnt/secret-host-path/worktrees/child-1',
+            },
+          },
+          {
+            ...makeSessionFixture({
+              id: 'sess-child-2-secret-id',
+              name: '',
+              parentSessionId: 'sess-parent-secret-id',
+              childAlias: 'child-2',
+              task: '',
+              status: 'done',
+              host: { id: 'local', name: 'Workstation Alpha' },
+              harness: { id: 'local:codex', name: 'Codex Sol', command: 'codex' },
+            }),
+          },
+        ],
+      }),
+    });
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: false,
+    });
+    const cache = new SessionCredentialCache(false);
+    const onOpenSessionChat = jest.fn();
+
+    let renderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      renderer = ReactTestRenderer.create(
+        <DashboardScreen
+          onOpenSettings={jest.fn()}
+          onOpenSessions={jest.fn()}
+          onOpenSessionChat={onOpenSessionChat}
+          apiClient={client}
+          credentialCache={cache}
+          allowDebugLoopback={false}
+        />,
+      );
+      await flushAsync();
+    });
+
+    try {
+      // Total counts all 3 sessions once (1 idle/done + 1 working + 1 done = 3).
+      expect(
+        renderer.root
+          .findByProps({ testID: 'dashboard-total-sessions' })
+          .props.children.join(''),
+      ).toBe('Total: 3');
+
+      // Only the parent card is top-level; children are NOT duplicated top-level.
+      expect(
+        renderer.root.findByProps({
+          testID: 'dashboard-session-card-sess-parent-secret-id',
+        }),
+      ).toBeDefined();
+      expect(
+        renderer.root.findAllByProps({
+          testID: 'dashboard-session-card-sess-child-1-secret-id',
+        }),
+      ).toHaveLength(0);
+      expect(
+        renderer.root.findAllByProps({
+          testID: 'dashboard-session-card-sess-child-2-secret-id',
+        }),
+      ).toHaveLength(0);
+
+      const initialText = getAllText(renderer);
+      expect(initialText).toContain('Coordinator Session');
+      expect(initialText).toContain('Workstation Alpha');
+      expect(initialText).toContain('Claude Opus');
+      expect(initialText).toContain('feat/ui-polish');
+      expect(initialText).toContain('2 children');
+
+      // Neither session IDs nor worktree.path appear anywhere in rendered text or accessibility labels.
+      const allAccessibilityLabels = renderer.root
+        .findAll(node => typeof node.props.accessibilityLabel === 'string')
+        .map(node => String(node.props.accessibilityLabel))
+        .join('\n');
+      for (const secret of [
+        'sess-parent-secret-id',
+        'sess-child-1-secret-id',
+        'sess-child-2-secret-id',
+        '/mnt/secret-host-path',
+      ]) {
+        expect(initialText).not.toContain(secret);
+        expect(allAccessibilityLabels).not.toContain(secret);
+      }
+
+      // Expanding the children chip reveals nested child rows and opens child by ID.
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'dashboard-children-toggle-sess-parent-secret-id' })
+          .props.onPress();
+        await flushAsync();
+      });
+
+      expect(
+        renderer.root.findByProps({
+          testID: 'dashboard-children-list-sess-parent-secret-id',
+        }),
+      ).toBeDefined();
+      const expandedText = getAllText(renderer);
+      expect(expandedText).toContain('Child Builder');
+      expect(expandedText).toContain('child-2');
+      expect(expandedText).not.toContain('sess-child-1-secret-id');
+      expect(expandedText).not.toContain('sess-child-2-secret-id');
+
+      renderer.root
+        .findByProps({ testID: 'dashboard-child-card-sess-child-1-secret-id' })
+        .props.onPress();
+      expect(onOpenSessionChat).toHaveBeenCalledWith('sess-child-1-secret-id');
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('toggles discrete Refresh in N s popup on connection badge tap without URL or buttons', async () => {
+    mockConfiguredKeystore();
+    let currentTimeMs = 1_700_000_000_000;
+    const now = () => currentTimeMs;
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      retryAfter: null,
+      body: JSON.stringify({
+        apiVersion: 'v1',
+        sessions: [makeSessionFixture({ id: 'sess-pop-1', name: 'Popup Session' })],
+      }),
+    });
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: false,
+      now,
+    });
+    const cache = new SessionCredentialCache(false);
+
+    let renderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      renderer = ReactTestRenderer.create(
+        <DashboardScreen
+          onOpenSettings={jest.fn()}
+          onOpenSessions={jest.fn()}
+          onOpenSessionChat={jest.fn()}
+          apiClient={client}
+          credentialCache={cache}
+          allowDebugLoopback={false}
+          pollIntervalMs={10000}
+          now={now}
+        />,
+      );
+      await flushAsync();
+    });
+
+    try {
+      expect(
+        renderer.root.findAllByProps({ testID: 'dashboard-poll-countdown-popup' }),
+      ).toHaveLength(0);
+
+      // Tap connection badge -> opens discrete countdown popup.
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'dashboard-connection-badge' })
+          .props.onPress();
+        await flushAsync();
+      });
+
+      const popupText = renderer.root
+        .findByProps({ testID: 'dashboard-poll-countdown-text' })
+        .props.children.join('');
+      expect(popupText).toBe('Refresh in 10 s');
+      expect(getAllText(renderer)).not.toContain(TEST_URL);
+
+      // Advance 3s -> countdown updates from real polling timer.
+      currentTimeMs += 3000;
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(3000);
+        await flushAsync();
+      });
+      expect(
+        renderer.root
+          .findByProps({ testID: 'dashboard-poll-countdown-text' })
+          .props.children.join(''),
+      ).toBe('Refresh in 7 s');
+
+      // Tap badge again -> closes popup.
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'dashboard-connection-badge' })
+          .props.onPress();
+        await flushAsync();
+      });
+      expect(
+        renderer.root.findAllByProps({ testID: 'dashboard-poll-countdown-popup' }),
+      ).toHaveLength(0);
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('never displays session ID even when name and task are empty, and surfaces needs_input child without duplication', async () => {
+    mockConfiguredKeystore();
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      retryAfter: null,
+      body: JSON.stringify({
+        apiVersion: 'v1',
+        sessions: [
+          makeSessionFixture({
+            id: 'sess-empty-title-id',
+            name: '',
+            task: '',
+            status: 'idle',
+          }),
+          makeSessionFixture({
+            id: 'sess-parent-with-ni-child',
+            name: 'Parent Orchestrator',
+            task: 'Coordinate workers',
+            status: 'working',
+          }),
+          makeSessionFixture({
+            id: 'sess-ni-child-id',
+            name: 'Child Waiting Approval',
+            parentSessionId: 'sess-parent-with-ni-child',
+            childAlias: 'child-1',
+            task: 'Confirm schema migration',
+            status: 'needs_input',
+          }),
+        ],
+      }),
+    });
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: false,
+    });
+    const cache = new SessionCredentialCache(false);
+
+    let renderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      renderer = ReactTestRenderer.create(
+        <DashboardScreen
+          onOpenSettings={jest.fn()}
+          onOpenSessions={jest.fn()}
+          onOpenSessionChat={jest.fn()}
+          apiClient={client}
+          credentialCache={cache}
+          allowDebugLoopback={false}
+        />,
+      );
+      await flushAsync();
+    });
+
+    try {
+      const text = getAllText(renderer);
+      expect(text).toContain('Untitled session');
+      expect(text).toContain('Child Waiting Approval');
+      expect(text).toContain('Parent: Parent Orchestrator');
+      expect(text).toContain('1 child');
+      expect(text).not.toContain('sess-empty-title-id');
+      expect(text).not.toContain('sess-parent-with-ni-child');
+      expect(text).not.toContain('sess-ni-child-id');
+
+      // Needs input child appears in Needs input section, NOT duplicated as top-level in Sessions section.
+      const needsInputSection = renderer.root.findByProps({
+        testID: 'dashboard-needs-input-section',
+      });
+      expect(
+        needsInputSection.findByProps({
+          testID: 'dashboard-session-card-sess-ni-child-id',
+        }),
+      ).toBeDefined();
+      const otherSection = renderer.root.findByProps({
+        testID: 'dashboard-other-sessions-section',
+      });
+      expect(
+        otherSection.findAllByProps({
+          testID: 'dashboard-session-card-sess-ni-child-id',
+        }),
+      ).toHaveLength(0);
+
+      // Expand parent: chip still counts 1 child, child card is NOT duplicated,
+      // and compact non-card reference indicates the child is waiting in Need input.
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({
+            testID: 'dashboard-children-toggle-sess-parent-with-ni-child',
+          })
+          .props.onPress();
+        await flushAsync();
+      });
+
+      const expandedText = getAllText(renderer);
+      expect(expandedText.split('Child Waiting Approval').length - 1).toBe(1);
+      expect(expandedText).toContain('1 child');
+      expect(expandedText).toContain('1 waiting in Need input');
+      expect(
+        otherSection.findAllByProps({
+          testID: 'dashboard-child-card-sess-ni-child-id',
+        }),
+      ).toHaveLength(0);
+      expect(
+        otherSection.findByProps({
+          testID: 'dashboard-children-needs-input-ref-sess-parent-with-ni-child',
+        }),
+      ).toBeDefined();
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('UI-2 keeps max 4 categories in bar and legend while rendering discrete notice for unknown statuses', async () => {
+    mockConfiguredKeystore();
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      retryAfter: null,
+      body: JSON.stringify({
+        apiVersion: 'v1',
+        sessions: [
+          makeSessionFixture({ id: 'sess-known-idle', name: 'Idle One', status: 'idle' }),
+          makeSessionFixture({
+            id: 'sess-unknown-1',
+            name: 'Unknown State One',
+            status: 'custom_backend_state',
+          }),
+        ],
+      }),
+    });
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: false,
+    });
+    const cache = new SessionCredentialCache(false);
+
+    let renderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      renderer = ReactTestRenderer.create(
+        <DashboardScreen
+          onOpenSettings={jest.fn()}
+          onOpenSessions={jest.fn()}
+          onOpenSessionChat={jest.fn()}
+          apiClient={client}
+          credentialCache={cache}
+          allowDebugLoopback={false}
+        />,
+      );
+      await flushAsync();
+    });
+
+    try {
+      const text = getAllText(renderer);
+      expect(text).toContain('Total: 2');
+      expect(text).toContain('1 session with unknown status');
+      expect(text).not.toContain('Other');
+
+      const legend = renderer.root.findByProps({
+        testID: 'dashboard-distribution-legend',
+      });
+      expect(
+        legend.findAll(
+          node =>
+            node.type === Text &&
+            typeof node.props.testID === 'string' &&
+            node.props.testID.startsWith('dashboard-legend-'),
+        ),
+      ).toHaveLength(4);
+      expect(
+        renderer.root.findAllByProps({ testID: 'dashboard-bar-segment-other' }),
+      ).toHaveLength(0);
+      expect(
+        renderer.root.findByProps({
+          testID: 'dashboard-unknown-status-notice',
+        }),
+      ).toBeDefined();
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('UI-3 renders exact count/total proportional bar widths and hides inner number on narrow segments while keeping accessibilityLabel', async () => {
+    mockConfiguredKeystore();
+    const sessions = [
+      makeSessionFixture({
+        id: 'sess-ni-tiny',
+        name: 'Tiny Needs Input',
+        status: 'needs_input',
+      }),
+      ...Array.from({ length: 19 }, (_, idx) =>
+        makeSessionFixture({
+          id: `sess-idle-${idx}`,
+          name: `Idle ${idx}`,
+          status: 'idle',
+        }),
+      ),
+    ];
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      retryAfter: null,
+      body: JSON.stringify({
+        apiVersion: 'v1',
+        sessions,
+      }),
+    });
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: false,
+    });
+    const cache = new SessionCredentialCache(false);
+
+    let renderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      renderer = ReactTestRenderer.create(
+        <DashboardScreen
+          onOpenSettings={jest.fn()}
+          onOpenSessions={jest.fn()}
+          onOpenSessionChat={jest.fn()}
+          apiClient={client}
+          credentialCache={cache}
+          allowDebugLoopback={false}
+        />,
+      );
+      await flushAsync();
+    });
+
+    try {
+      const bar = renderer.root.findByProps({
+        testID: 'dashboard-distribution-bar',
+      });
+      await ReactTestRenderer.act(async () => {
+        bar.props.onLayout({ nativeEvent: { layout: { width: 322 } } });
+      });
+
+      const niSeg = renderer.root.findByProps({
+        testID: 'dashboard-bar-segment-need-input',
+      });
+      const idleSeg = renderer.root.findByProps({
+        testID: 'dashboard-bar-segment-done/idle',
+      });
+
+      expect(niSeg.props.accessibilityLabel).toBe('1 Need input');
+      expect(idleSeg.props.accessibilityLabel).toBe('19 Done/idle');
+
+      const niFlatStyle = Object.assign({}, ...(Array.isArray(niSeg.props.style) ? niSeg.props.style : [niSeg.props.style]));
+      const idleFlatStyle = Object.assign({}, ...(Array.isArray(idleSeg.props.style) ? idleSeg.props.style : [idleSeg.props.style]));
+      expect(niFlatStyle.width).toBe('5%');
+      expect(niFlatStyle.minWidth).toBeUndefined();
+      expect(niFlatStyle.paddingHorizontal).toBeUndefined();
+      expect(idleFlatStyle.width).toBe('95%');
+
+      // 5% of 320dp = 16dp (< 17dp needed for '1'), so inner Text is omitted while 95% keeps '19'.
+      expect(niSeg.findAllByType(Text)).toHaveLength(0);
+      expect(idleSeg.findAllByType(Text).map(node => String(node.props.children))).toContain('19');
+      expect(getAllText(renderer)).toContain('1 Need input');
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('UI-4 renders host icon and accessible label on expanded child cards', async () => {
+    mockConfiguredKeystore();
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      retryAfter: null,
+      body: JSON.stringify({
+        apiVersion: 'v1',
+        sessions: [
+          makeSessionFixture({
+            id: 'sess-parent-host',
+            name: 'Parent Coord',
+            status: 'idle',
+            host: { id: 'host-main', name: 'Parent Box' },
+          }),
+          makeSessionFixture({
+            id: 'sess-child-host',
+            name: 'Worker Child',
+            parentSessionId: 'sess-parent-host',
+            status: 'working',
+            host: { id: 'host-remote', name: 'Remote Build Host' },
+          }),
+        ],
+      }),
+    });
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: false,
+    });
+    const cache = new SessionCredentialCache(false);
+
+    let renderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      renderer = ReactTestRenderer.create(
+        <DashboardScreen
+          onOpenSettings={jest.fn()}
+          onOpenSessions={jest.fn()}
+          onOpenSessionChat={jest.fn()}
+          apiClient={client}
+          credentialCache={cache}
+          allowDebugLoopback={false}
+        />,
+      );
+      await flushAsync();
+    });
+
+    try {
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'dashboard-children-toggle-sess-parent-host' })
+          .props.onPress();
+        await flushAsync();
+      });
+
+      const childCard = renderer.root.findByProps({
+        testID: 'dashboard-child-card-sess-child-host',
+      });
+      const childText = childCard
+        .findAllByType(Text)
+        .map(node => String(node.props.children))
+        .join('\n');
+      expect(childText).toContain('Remote Build Host');
+      expect(
+        childCard.findByProps({
+          accessibilityLabel: 'Host: Remote Build Host',
+        }),
+      ).toBeDefined();
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('UI-5 applies top safe-area inset on opaque root container above ScrollView', async () => {
+    mockConfiguredKeystore();
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      retryAfter: null,
+      body: JSON.stringify({
+        apiVersion: 'v1',
+        sessions: [makeSessionFixture({ id: 'sess-inset-1', name: 'Inset Test' })],
+      }),
+    });
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: false,
+    });
+    const cache = new SessionCredentialCache(false);
+
+    let renderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      renderer = ReactTestRenderer.create(
+        <SafeAreaInsetsContext.Provider
+          value={{ top: 24, right: 0, bottom: 0, left: 0 }}>
+          <DashboardScreen
+            onOpenSettings={jest.fn()}
+            onOpenSessions={jest.fn()}
+            onOpenSessionChat={jest.fn()}
+            apiClient={client}
+            credentialCache={cache}
+            allowDebugLoopback={false}
+          />
+        </SafeAreaInsetsContext.Provider>,
+      );
+      await flushAsync();
+    });
+
+    try {
+      const root = renderer.root.findByProps({ testID: 'dashboard-root' });
+      const rootStyle = Object.assign(
+        {},
+        ...(Array.isArray(root.props.style)
+          ? root.props.style
+          : [root.props.style]),
+      );
+      expect(rootStyle.paddingTop).toBe(24);
+      expect(rootStyle.backgroundColor).toBe('#0d1117');
+
+      const scroll = renderer.root.findByProps({ testID: 'dashboard-screen' });
+      const contentStyle = Object.assign(
+        {},
+        ...(Array.isArray(scroll.props.contentContainerStyle)
+          ? scroll.props.contentContainerStyle
+          : [scroll.props.contentContainerStyle]),
+      );
+      expect(contentStyle.paddingTop).toBe(10);
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
 });
 
 describe('SessionChatScreen S70-2 relock guard', () => {

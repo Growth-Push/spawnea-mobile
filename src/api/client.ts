@@ -177,6 +177,13 @@ function isValidHarnessRef(value: unknown): boolean {
   );
 }
 
+function isValidWorktreeRef(value: unknown): boolean {
+  if (value === undefined || value === null) {
+    return true;
+  }
+  return isRecord(value) && isNullableOptionalString(value.branch);
+}
+
 export function isValidSessionSummary(value: unknown): value is SessionSummary {
   return (
     isRecord(value) &&
@@ -188,11 +195,52 @@ export function isValidSessionSummary(value: unknown): value is SessionSummary {
     isValidIdNameRef(value.host) &&
     isValidIdNameRef(value.project) &&
     isValidHarnessRef(value.harness) &&
+    isValidWorktreeRef(value.worktree) &&
     isNonEmptyString(value.status) &&
     typeof value.active === 'boolean' &&
     isNonEmptyString(value.createdAt) &&
     isNonEmptyString(value.lastActivityAt)
   );
+}
+
+/**
+ * Normalizes a validated SessionSummary and discards host filesystem fields
+ * such as `worktree.path` so local/remote paths are never retained in memory.
+ */
+export function sanitizeSessionSummary(session: SessionSummary): SessionSummary {
+  let sanitizedWorktree: SessionSummary['worktree'];
+  if (session.worktree === null) {
+    sanitizedWorktree = null;
+  } else if (session.worktree !== undefined) {
+    sanitizedWorktree =
+      session.worktree.branch !== undefined
+        ? { branch: session.worktree.branch }
+        : {};
+  }
+
+  return {
+    id: session.id,
+    name: session.name,
+    ...(session.parentSessionId !== undefined
+      ? { parentSessionId: session.parentSessionId }
+      : {}),
+    ...(session.childAlias !== undefined
+      ? { childAlias: session.childAlias }
+      : {}),
+    task: session.task,
+    host: { id: session.host.id, name: session.host.name },
+    project: { id: session.project.id, name: session.project.name },
+    harness: {
+      id: session.harness.id,
+      name: session.harness.name,
+      command: session.harness.command,
+    },
+    ...(sanitizedWorktree !== undefined ? { worktree: sanitizedWorktree } : {}),
+    status: session.status,
+    active: session.active,
+    createdAt: session.createdAt,
+    lastActivityAt: session.lastActivityAt,
+  };
 }
 
 function isValidHistoryItem(value: unknown): value is SessionHistoryItem {
@@ -396,6 +444,10 @@ export class SpawneaApiClient {
       undefined,
       behavior,
       isValidSessionsListResponse,
+      payload => ({
+        apiVersion: payload.apiVersion,
+        sessions: payload.sessions.map(sanitizeSessionSummary),
+      }),
     );
   }
 
@@ -413,6 +465,10 @@ export class SpawneaApiClient {
       behavior,
       (payload): payload is SessionDetailResponse =>
         isValidSessionDetailResponse(payload) && payload.session.id === sessionId,
+      payload => ({
+        apiVersion: payload.apiVersion,
+        session: sanitizeSessionSummary(payload.session),
+      }),
     );
   }
 
@@ -520,6 +576,7 @@ export class SpawneaApiClient {
     body: string | undefined,
     behavior: RequestBehaviorOptions,
     validatePayload: (payload: unknown) => payload is T,
+    sanitizePayload?: (payload: T) => T,
   ): Promise<ApiResult<T>> {
     const urlCheck = validateServerUrl(
       config.serverUrl,
@@ -692,7 +749,7 @@ export class SpawneaApiClient {
     return {
       ok: true,
       status: response.status,
-      data: parsed,
+      data: sanitizePayload ? sanitizePayload(parsed) : parsed,
     };
   }
 }

@@ -14,6 +14,10 @@ export interface SessionHarnessRef {
   command: string;
 }
 
+export interface SessionWorktreeRef {
+  branch?: string | null;
+}
+
 export interface SessionSummary {
   id: string;
   name: string;
@@ -23,6 +27,7 @@ export interface SessionSummary {
   host: SessionHostRef;
   project: SessionProjectRef;
   harness: SessionHarnessRef;
+  worktree?: SessionWorktreeRef | null;
   status: string;
   active: boolean;
   createdAt: string;

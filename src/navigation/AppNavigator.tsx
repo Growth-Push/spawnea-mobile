@@ -194,6 +194,13 @@ export function AppNavigator(): React.JSX.Element {
           options={{
             title: 'Dashboard',
             tabBarLabel: 'Dashboard',
+            headerShown: false,
+            tabBarStyle: {
+              backgroundColor: '#0d1117',
+              borderTopColor: '#21262d',
+            },
+            tabBarActiveTintColor: '#a78bfa',
+            tabBarInactiveTintColor: '#8b949e',
             tabBarIcon: renderDashboardTabIcon,
           }}>
           {({

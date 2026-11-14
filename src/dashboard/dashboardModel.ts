@@ -3,8 +3,7 @@ import type { ApiErrorCategory, ApiResult, SessionSummary } from '../api/types';
 
 /**
  * Exact session status values defined by the Spawnea backend contract
- * (`SessionStatus` in `packages/domain`). Ordered with `needs_input` first so
- * actionable prompts stay highlighted in summaries.
+ * (`SessionStatus` in `packages/domain`).
  */
 export const CANONICAL_SESSION_STATUSES = [
   'needs_input',
@@ -19,15 +18,22 @@ export const CANONICAL_SESSION_STATUSES = [
 export type CanonicalSessionStatus =
   (typeof CANONICAL_SESSION_STATUSES)[number];
 
-export interface StatusCountItem {
-  status: string;
+export type DashboardDistributionCategory =
+  | 'need-input'
+  | 'running'
+  | 'done/idle'
+  | 'error';
+
+export interface DistributionCategoryItem {
+  category: DashboardDistributionCategory;
+  label: string;
   count: number;
-  isCanonical: boolean;
 }
 
-export interface DashboardStatusSummary {
+export interface DashboardDistributionSummary {
   total: number;
-  counts: StatusCountItem[];
+  unknownCount: number;
+  categories: DistributionCategoryItem[];
 }
 
 export type DashboardErrorKind =
@@ -47,7 +53,6 @@ export interface DashboardRefreshError {
 
 export interface DashboardSnapshot {
   sessions: SessionSummary[];
-  lastUpdatedAtMs: number;
   serverUrl: string;
   credentialGeneration: number;
 }
@@ -97,40 +102,120 @@ function parseTimestampMs(session: SessionSummary): number {
 }
 
 /**
- * Computes exact session counts grouped by real API `status` strings from the
- * `/api/v1/sessions` list response without synthesizing metrics or states.
+ * Maps a raw API `status` into one of the four Dashboard distribution groups:
+ * `needs_input` -> `need-input`, `working`+`starting` -> `running`,
+ * `idle`+`done` -> `done/idle`, `error`+`disconnected` -> `error`.
+ * Unrecognized statuses return `null` so they are counted separately without
+ * creating a fifth category or inferring semantics.
  */
-export function computeStatusSummary(
+export function mapSessionStatusToCategory(
+  status: string,
+): DashboardDistributionCategory | null {
+  switch (status) {
+    case 'needs_input':
+      return 'need-input';
+    case 'working':
+    case 'starting':
+      return 'running';
+    case 'idle':
+    case 'done':
+      return 'done/idle';
+    case 'error':
+    case 'disconnected':
+      return 'error';
+    default:
+      return null;
+  }
+}
+
+/**
+ * Aggregates real API sessions into the four Dashboard summary categories plus
+ * `unknownCount` for unrecognized statuses, with `total` equal to all sessions.
+ */
+export function computeDistributionSummary(
   sessions: SessionSummary[],
-): DashboardStatusSummary {
-  const tally = new Map<string, number>();
+): DashboardDistributionSummary {
+  const counts: Record<DashboardDistributionCategory, number> = {
+    'need-input': 0,
+    running: 0,
+    'done/idle': 0,
+    error: 0,
+  };
+  let unknownCount = 0;
+
   for (const session of sessions) {
-    tally.set(session.status, (tally.get(session.status) ?? 0) + 1);
+    const category = mapSessionStatusToCategory(session.status);
+    if (category === null) {
+      unknownCount += 1;
+    } else {
+      counts[category] += 1;
+    }
   }
 
-  const canonicalSet = new Set<string>(CANONICAL_SESSION_STATUSES);
-  const counts: StatusCountItem[] = CANONICAL_SESSION_STATUSES.map(status => ({
-    status,
-    count: tally.get(status) ?? 0,
-    isCanonical: true,
-  }));
-
-  const extraStatuses = Array.from(tally.keys())
-    .filter(status => !canonicalSet.has(status))
-    .sort((a, b) => a.localeCompare(b));
-
-  for (const status of extraStatuses) {
-    counts.push({
-      status,
-      count: tally.get(status) ?? 0,
-      isCanonical: false,
-    });
-  }
+  const categories: DistributionCategoryItem[] = [
+    {
+      category: 'need-input',
+      label: 'Need input',
+      count: counts['need-input'],
+    },
+    {
+      category: 'running',
+      label: 'Running',
+      count: counts.running,
+    },
+    {
+      category: 'done/idle',
+      label: 'Done/idle',
+      count: counts['done/idle'],
+    },
+    {
+      category: 'error',
+      label: 'Error',
+      count: counts.error,
+    },
+  ];
 
   return {
     total: sessions.length,
-    counts,
+    unknownCount,
+    categories,
   };
+}
+
+/**
+ * Formats a display title for a session without exposing its technical ID.
+ */
+export function formatSessionTitle(session: SessionSummary): string {
+  return (
+    session.name.trim() ||
+    session.task.trim() ||
+    session.childAlias?.trim() ||
+    'Untitled session'
+  );
+}
+
+/**
+ * Formats raw API status strings into concise readable chip labels.
+ */
+export function formatSessionStatusLabel(status: string): string {
+  switch (status) {
+    case 'needs_input':
+      return 'Needs input';
+    case 'working':
+      return 'Working';
+    case 'starting':
+      return 'Starting';
+    case 'idle':
+      return 'Idle';
+    case 'done':
+      return 'Done';
+    case 'error':
+      return 'Error';
+    case 'disconnected':
+      return 'Disconnected';
+    default:
+      return status;
+  }
 }
 
 /**
@@ -154,21 +239,61 @@ export function sortDashboardSessions(
   });
 }
 
-export function partitionDashboardSessions(sessions: SessionSummary[]): {
+export interface DashboardPartitionedSessions {
   needsInput: SessionSummary[];
   otherSessions: SessionSummary[];
-} {
+  childrenByParentId: Map<string, SessionSummary[]>;
+  parentTitleById: Map<string, string>;
+}
+
+/**
+ * Splits sorted sessions into `needsInput` (always surfaced) and top-level
+ * `otherSessions` (children whose parent exists in the snapshot are grouped
+ * under their parent instead of duplicated as top-level cards).
+ */
+export function partitionDashboardSessions(
+  sessions: SessionSummary[],
+): DashboardPartitionedSessions {
   const sorted = sortDashboardSessions(sessions);
+  const sessionIds = new Set(sorted.map(session => session.id));
+  const childrenByParentId = new Map<string, SessionSummary[]>();
+  const parentTitleById = new Map<string, string>();
+
+  for (const session of sorted) {
+    parentTitleById.set(session.id, formatSessionTitle(session));
+    const parentId = session.parentSessionId?.trim();
+    if (parentId && parentId !== session.id && sessionIds.has(parentId)) {
+      const existing = childrenByParentId.get(parentId);
+      if (existing) {
+        existing.push(session);
+      } else {
+        childrenByParentId.set(parentId, [session]);
+      }
+    }
+  }
+
   const needsInput: SessionSummary[] = [];
   const otherSessions: SessionSummary[] = [];
   for (const session of sorted) {
     if (session.status === 'needs_input') {
       needsInput.push(session);
-    } else {
+      continue;
+    }
+    const parentId = session.parentSessionId?.trim();
+    const hasParentInSnapshot = Boolean(
+      parentId && parentId !== session.id && sessionIds.has(parentId),
+    );
+    if (!hasParentInSnapshot) {
       otherSessions.push(session);
     }
   }
-  return { needsInput, otherSessions };
+
+  return {
+    needsInput,
+    otherSessions,
+    childrenByParentId,
+    parentTitleById,
+  };
 }
 
 export function mapApiFailureToDashboardError(
@@ -211,41 +336,4 @@ export function mapApiFailureToDashboardError(
     retryAfterSeconds: failure.retryAfterSeconds,
     message,
   };
-}
-
-function pad2(n: number): string {
-  return n < 10 ? `0${n}` : String(n);
-}
-
-/**
- * Formats a UTC-based or local wall-clock time string deterministically.
- */
-export function formatLastUpdatedTimestamp(timestampMs: number): string {
-  const date = new Date(timestampMs);
-  if (Number.isNaN(date.getTime())) {
-    return 'Unknown';
-  }
-  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(
-    date.getSeconds(),
-  )}`;
-}
-
-/**
- * Formats a non-negative duration in human-readable age units (`0s`, `15s`, `2m 5s`, `1h 3m`).
- */
-export function formatAgeDuration(ageMs: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ageMs / 1000));
-  if (totalSeconds < 60) {
-    return `${totalSeconds}s`;
-  }
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  const remainingSeconds = totalSeconds % 60;
-  if (totalMinutes < 60) {
-    return remainingSeconds > 0
-      ? `${totalMinutes}m ${remainingSeconds}s`
-      : `${totalMinutes}m`;
-  }
-  const hours = Math.floor(totalMinutes / 60);
-  const remainingMinutes = totalMinutes % 60;
-  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
 }
