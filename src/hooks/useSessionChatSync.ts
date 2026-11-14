@@ -12,9 +12,10 @@ import {
   combineSyncFailures,
   DEFAULT_CHAT_HISTORY_LIMIT,
   DEFAULT_CHAT_OUTPUT_LINES,
-  didTranscriptCursorReset,
+  didScreenCursorRestart,
   mapChatFailure,
   mergeTranscriptItems,
+  pruneObsoleteUnresolvedSubmissions,
   SessionChatSnapshot,
   SessionChatViewState,
 } from '../chat/chatModel';
@@ -77,78 +78,93 @@ function isForegroundAppState(state: string | null | undefined): boolean {
   return state !== 'background' && state !== 'inactive';
 }
 
-function parseScreenCursorMeta(cursor?: string): {
-  line: number | null;
-  fingerprint: string | null;
-} {
-  if (!cursor) {
-    return { line: null, fingerprint: null };
-  }
-  const match = /^line:(\d+)(?::fp:(.+))?$/.exec(cursor.trim());
-  if (!match) {
-    return { line: null, fingerprint: null };
-  }
-  const line = Number.parseInt(match[1], 10);
-  return {
-    line: Number.isFinite(line) && line >= 0 ? line : null,
-    fingerprint: match[2]?.trim() || null,
-  };
-}
-
 function didScreenPaginationRestart(
   previous: SessionHistoryResponse,
   next: SessionHistoryResponse,
 ): boolean {
-  const prevMeta = parseScreenCursorMeta(previous.cursor);
-  const nextMeta = parseScreenCursorMeta(next.cursor);
+  return didScreenCursorRestart({
+    prevCursor: previous.cursor,
+    nextCursor: next.cursor,
+    prevItems: previous.items,
+    nextItems: next.items,
+  });
+}
 
-  if (next.cursor === 'line:0' || nextMeta.line === 0) {
+function parseTranscriptContinuationCursor(cursor?: string): {
+  offset: number | null;
+  block: number | null;
+  file: string | null;
+  head: string | null;
+} {
+  if (!cursor) {
+    return { offset: null, block: null, file: null, head: null };
+  }
+  const trimmed = cursor.trim();
+  const offsetMatch = /^offset:(\d+)(?::|$)/.exec(trimmed);
+  const blockMatch = /(?:^|:)block:(\d+)(?::|$)/.exec(trimmed);
+  const fileMatch = /(?:^|:)file:([^:]+)/.exec(trimmed);
+  const headMatch = /(?:^|:)head:([^:]+)/.exec(trimmed);
+  const offset = offsetMatch ? Number.parseInt(offsetMatch[1], 10) : null;
+  const block = blockMatch ? Number.parseInt(blockMatch[1], 10) : null;
+  return {
+    offset:
+      offset !== null && Number.isFinite(offset) && offset >= 0 ? offset : null,
+    block:
+      block !== null && Number.isFinite(block) && block >= 0 ? block : null,
+    file: fileMatch?.[1]?.trim() || null,
+    head: headMatch?.[1]?.trim() || null,
+  };
+}
+
+function isStrictTranscriptContinuation(
+  prevCursor?: string,
+  nextCursor?: string,
+): boolean {
+  if (!prevCursor || !nextCursor) {
+    return false;
+  }
+  const prev = parseTranscriptContinuationCursor(prevCursor);
+  const next = parseTranscriptContinuationCursor(nextCursor);
+  const hasStructuredToken =
+    prev.offset !== null ||
+    next.offset !== null ||
+    prev.block !== null ||
+    next.block !== null ||
+    prev.file !== null ||
+    next.file !== null ||
+    prev.head !== null ||
+    next.head !== null;
+
+  if (!hasStructuredToken) {
+    return prevCursor.trim() !== nextCursor.trim();
+  }
+  if ((prev.file !== null || next.file !== null) && prev.file !== next.file) {
+    return false;
+  }
+  if ((prev.head !== null || next.head !== null) && prev.head !== next.head) {
+    return false;
+  }
+  if (prev.offset === null || next.offset === null) {
+    return false;
+  }
+  if (next.offset > prev.offset) {
     return true;
   }
-
-  if (
-    prevMeta.fingerprint !== null &&
-    nextMeta.fingerprint !== null &&
-    nextMeta.fingerprint !== prevMeta.fingerprint
-  ) {
-    return true;
-  }
-
-  if (
-    (prevMeta.fingerprint === null) !== (nextMeta.fingerprint === null) &&
-    (nextMeta.fingerprint !== null || nextMeta.line !== null)
-  ) {
-    return true;
-  }
-
-  if (
-    prevMeta.line !== null &&
-    nextMeta.line !== null &&
-    nextMeta.line < prevMeta.line
-  ) {
-    return true;
-  }
-
-  if (previous.items.length > 0 && next.items.length > 0) {
-    const existingIds = new Set(previous.items.map(item => item.id));
-    if (next.items.some(item => existingIds.has(item.id))) {
-      return true;
-    }
-  }
-
-  return false;
+  return (
+    next.offset === prev.offset &&
+    next.block !== null &&
+    next.block > (prev.block ?? -1)
+  );
 }
 
 async function fetchHistoryCycle(params: {
   apiClient: SpawneaApiClient;
   credentials: UnlockedApiCredentials;
   sessionId: string;
-  previousSnapshot: SessionChatSnapshot | null;
-  forceFullWindow: boolean;
   isPolling: boolean;
   isSupersededOrHidden: () => boolean;
 }): Promise<
-  | { ok: true; response: SessionHistoryResponse; usedCursor: boolean }
+  | { ok: true; response: SessionHistoryResponse; incomplete: boolean }
   | { ok: false; failure: Extract<ApiResult<unknown>, { ok: false }> }
   | { ok: 'superseded' }
 > {
@@ -156,24 +172,14 @@ async function fetchHistoryCycle(params: {
     apiClient,
     credentials,
     sessionId,
-    previousSnapshot,
-    forceFullWindow,
     isPolling,
     isSupersededOrHidden,
   } = params;
 
-  const prevCursor =
-    !forceFullWindow && previousSnapshot?.historyAvailable
-      ? previousSnapshot.historyCursor
-      : undefined;
-  const usedCursor = Boolean(prevCursor);
-
   const firstRes = await apiClient.getSessionHistory(
     credentials,
     sessionId,
-    usedCursor
-      ? { limit: FORWARD_PAGE_LIMIT, cursor: prevCursor }
-      : { limit: DEFAULT_CHAT_HISTORY_LIMIT },
+    { limit: DEFAULT_CHAT_HISTORY_LIMIT },
     { isPolling },
   );
   if (isSupersededOrHidden()) {
@@ -184,22 +190,17 @@ async function fetchHistoryCycle(params: {
   }
 
   let combined: SessionHistoryResponse = firstRes.data;
-  const resetOnFirstPage =
-    usedCursor &&
-    combined.source === 'transcript' &&
-    didTranscriptCursorReset({
-      prevCursor,
-      nextCursor: combined.cursor,
-    });
-  let effectiveUsedCursor = usedCursor && !resetOnFirstPage;
-
-  if (!combined.available || !combined.hasMore || !combined.cursor) {
-    return { ok: true, response: combined, usedCursor: effectiveUsedCursor };
+  if (!combined.available || !combined.hasMore) {
+    return { ok: true, response: combined, incomplete: false };
+  }
+  if (!combined.cursor) {
+    return { ok: true, response: combined, incomplete: true };
   }
 
-  // Drain bounded forward continuation pages when new history exceeded one page.
+  // Drain bounded continuation pages only within this same refresh cycle.
   let pagesFetched = 1;
   let nextCursor: string | undefined = combined.cursor;
+  let stalled = false;
   while (
     combined.hasMore &&
     nextCursor &&
@@ -220,51 +221,43 @@ async function fetchHistoryCycle(params: {
     pagesFetched += 1;
     const page = pageRes.data;
     if (!page.available) {
-      combined = page;
-      effectiveUsedCursor = false;
-      break;
+      return { ok: true, response: page, incomplete: false };
     }
     if (page.source !== combined.source) {
-      combined = page;
-      effectiveUsedCursor = false;
+      stalled = true;
       break;
     }
-    if (page.source === 'transcript') {
-      if (
-        didTranscriptCursorReset({
-          prevCursor: combined.cursor,
-          nextCursor: page.cursor,
-        })
-      ) {
+    if (page.source === 'screen') {
+      if (didScreenPaginationRestart(combined, page)) {
         combined = {
           ...page,
           items: [...page.items],
         };
-        effectiveUsedCursor = false;
       } else {
         combined = {
           ...page,
-          items: mergeTranscriptItems(combined.items, page.items),
+          items: [...combined.items, ...page.items],
         };
       }
-    } else if (didScreenPaginationRestart(combined, page)) {
-      combined = {
-        ...page,
-        items: [...page.items],
-      };
     } else {
+      if (!isStrictTranscriptContinuation(combined.cursor, page.cursor)) {
+        stalled = true;
+        break;
+      }
       combined = {
         ...page,
-        items: [...combined.items, ...page.items],
+        items: mergeTranscriptItems(combined.items, page.items),
       };
     }
-    if (!page.cursor || page.cursor === nextCursor) {
+    if (page.hasMore && (!page.cursor || page.cursor === nextCursor)) {
+      stalled = true;
       break;
     }
     nextCursor = page.cursor;
   }
 
-  return { ok: true, response: combined, usedCursor: effectiveUsedCursor };
+  const incomplete = stalled || Boolean(combined.available && combined.hasMore);
+  return { ok: true, response: combined, incomplete };
 }
 
 /**
@@ -498,7 +491,10 @@ export function useSessionChatSync({
         snapshotRef.current = null;
         autoUnlockDeclinedRef.current = false;
         pendingCooldownTriggerRef.current = null;
-        clearAllUnresolvedSubmissions(credentialCache);
+        pruneObsoleteUnresolvedSubmissions(credentialCache, {
+          credentialGeneration: generationAtStart,
+          serverUrl: normalizedUrl,
+        });
         clearPrivateUiState();
       } else if (
         snapshotRef.current !== null &&
@@ -507,7 +503,10 @@ export function useSessionChatSync({
         snapshotRef.current = null;
         autoUnlockDeclinedRef.current = false;
         pendingCooldownTriggerRef.current = null;
-        clearAllUnresolvedSubmissions(credentialCache);
+        pruneObsoleteUnresolvedSubmissions(credentialCache, {
+          credentialGeneration: generationAtStart,
+          serverUrl: normalizedUrl,
+        });
         clearPrivateUiState();
       }
 
@@ -703,7 +702,6 @@ export function useSessionChatSync({
       }
 
       const isPolling = trigger === 'poll';
-      const forceFullWindow = trigger === 'manual';
 
       try {
         const [detailRes, historyCycle, outputRes] = await Promise.all([
@@ -714,8 +712,6 @@ export function useSessionChatSync({
             apiClient,
             credentials,
             sessionId: targetSessionId,
-            previousSnapshot: snapshotRef.current,
-            forceFullWindow,
             isPolling,
             isSupersededOrHidden,
           }),
@@ -748,11 +744,20 @@ export function useSessionChatSync({
             return;
           }
 
-          const historyState = applyHistoryFetchResult(
-            snapshotRef.current,
-            historyCycle.response,
-            historyCycle.usedCursor,
-          );
+          if (historyCycle.incomplete && snapshotRef.current !== null) {
+            setViewState({
+              status: 'stale',
+              snapshot: snapshotRef.current,
+              staleReason:
+                'History refresh did not complete within one cycle.',
+              errorKind: 'server_error',
+              retryAfterSeconds: null,
+            });
+            schedulePoll(pollIntervalMs);
+            return;
+          }
+
+          const historyState = applyHistoryFetchResult(historyCycle.response);
           const nextSnapshot: SessionChatSnapshot = {
             session: detailRes.data.session,
             ...historyState,

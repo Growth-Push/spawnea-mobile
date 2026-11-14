@@ -1,5 +1,6 @@
 import { AppState } from 'react-native';
 import type { SpawneaApiClient } from '../api/client';
+import { clearAllUnresolvedSubmissions } from '../chat/chatModel';
 import { isDebugLoopbackAllowed } from '../config/runtime';
 import { validateServerUrl } from '../config/validation';
 import {
@@ -197,6 +198,7 @@ export class SessionCredentialCache {
   invalidateForCredentialChange(): void {
     const hadTerminalLock = this.terminalAuthLock !== null;
     this.terminalAuthLock = null;
+    clearAllUnresolvedSubmissions(this);
     this.clear();
     if (hadTerminalLock) {
       for (const listener of this.terminalLockClearedListeners) {

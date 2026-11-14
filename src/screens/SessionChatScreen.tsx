@@ -112,6 +112,8 @@ function formatHistorySourceLabel(source: 'transcript' | 'screen'): string {
   return source === 'transcript' ? 'Transcript' : 'Screen';
 }
 
+let screenInstanceSeq = 0;
+
 export function SessionChatScreen({
   route,
   navigation: navigationProp,
@@ -164,6 +166,13 @@ export function SessionChatScreen({
   const submitLockRef = useRef(false);
   const mountedRef = useRef(true);
   const sessionEpochRef = useRef(0);
+  const screenInstanceIdRef = useRef<string>('');
+  if (!screenInstanceIdRef.current) {
+    screenInstanceSeq += 1;
+    screenInstanceIdRef.current = `chat-screen-${screenInstanceSeq}`;
+  }
+  const submissionStatusRef = useRef<ComposerSubmission['status'] | null>(null);
+  submissionStatusRef.current = submission?.status ?? null;
   const currentSessionIdRef = useRef<string | undefined>(rawSessionId);
   currentSessionIdRef.current = rawSessionId;
 
@@ -239,6 +248,7 @@ export function SessionChatScreen({
     setExpandedToolGroups({});
     setOutputLinesExpanded(false);
     setDraftText('');
+    submissionStatusRef.current = null;
     setSubmission(null);
     setKeyboardBottomPadding(0);
     hasInitialScrolledRef.current = false;
@@ -309,20 +319,32 @@ export function SessionChatScreen({
     trimmedSessionId,
   ]);
 
-  useEffect(() => {
-    if (!restoreScopeKey) {
-      return;
-    }
-
-    const syncRecordToScreen = (record: UnresolvedSubmissionRecord | null) => {
-      if (!record || !mountedRef.current) {
+  const syncRecordToScreen = useCallback(
+    (
+      record: UnresolvedSubmissionRecord | null,
+      scopeKey: UnresolvedSubmissionScopeKey,
+    ) => {
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!record) {
+        if (
+          submissionStatusRef.current === 'pending' ||
+          submissionStatusRef.current === 'unknown'
+        ) {
+          submitLockRef.current = false;
+          submissionStatusRef.current = null;
+          setSubmission(null);
+          setDraftText('');
+          setDraftRequestId(createClientRequestId(now()));
+        }
         return;
       }
       let nextSubmission = record.submission;
       if (nextSubmission.status === 'pending') {
         const inFlightId = getInFlightSubmissionRequestId(
           credentialCache,
-          restoreScopeKey,
+          scopeKey,
         );
         if (inFlightId !== nextSubmission.clientRequestId) {
           nextSubmission = {
@@ -333,15 +355,16 @@ export function SessionChatScreen({
           saveUnresolvedSubmission(
             credentialCache,
             {
-              ...restoreScopeKey,
+              ...scopeKey,
               submission: nextSubmission,
             },
-            { silent: true },
+            { originInstanceId: screenInstanceIdRef.current },
           );
         }
       }
       setDraftText(nextSubmission.submittedText);
       setDraftRequestId(nextSubmission.clientRequestId);
+      submissionStatusRef.current = nextSubmission.status;
       setSubmission(prev => {
         if (
           prev &&
@@ -353,16 +376,24 @@ export function SessionChatScreen({
         }
         return nextSubmission;
       });
-    };
+    },
+    [credentialCache, now],
+  );
+
+  useEffect(() => {
+    if (!restoreScopeKey) {
+      return;
+    }
 
     syncRecordToScreen(
       getUnresolvedSubmission(credentialCache, restoreScopeKey),
+      restoreScopeKey,
     );
 
     return subscribeUnresolvedSubmission(
       credentialCache,
       restoreScopeKey,
-      record => {
+      (record, event) => {
         if (!mountedRef.current) {
           return;
         }
@@ -375,13 +406,32 @@ export function SessionChatScreen({
           );
           setDraftText('');
           setDraftRequestId(createClientRequestId(now()));
-          triggerPostSendRefresh();
+          if (event.resolvedDelivered) {
+            triggerPostSendRefresh();
+          }
           return;
         }
-        syncRecordToScreen(record);
+        syncRecordToScreen(record, restoreScopeKey);
       },
+      screenInstanceIdRef.current,
     );
-  }, [credentialCache, now, restoreScopeKey, triggerPostSendRefresh]);
+  }, [
+    credentialCache,
+    now,
+    restoreScopeKey,
+    syncRecordToScreen,
+    triggerPostSendRefresh,
+  ]);
+
+  useEffect(() => {
+    if (!isFocused || !restoreScopeKey) {
+      return;
+    }
+    syncRecordToScreen(
+      getUnresolvedSubmission(credentialCache, restoreScopeKey),
+      restoreScopeKey,
+    );
+  }, [credentialCache, isFocused, restoreScopeKey, syncRecordToScreen]);
 
   const handleBack = useCallback(() => {
     if (navigation?.canGoBack?.()) {
@@ -455,7 +505,21 @@ export function SessionChatScreen({
         serverUrl: dispatchServerUrl,
         credentialGeneration: dispatchGeneration,
       };
+      const existingUnresolved = getUnresolvedSubmission(
+        credentialCache,
+        dispatchScopeKey,
+      );
+      if (
+        existingUnresolved &&
+        existingUnresolved.submission.clientRequestId !== requestId
+      ) {
+        syncRecordToScreen(existingUnresolved, dispatchScopeKey);
+        return;
+      }
       if (getInFlightSubmissionRequestId(credentialCache, dispatchScopeKey)) {
+        if (existingUnresolved) {
+          syncRecordToScreen(existingUnresolved, dispatchScopeKey);
+        }
         return;
       }
 
@@ -474,8 +538,9 @@ export function SessionChatScreen({
       saveUnresolvedSubmission(
         credentialCache,
         { ...dispatchScopeKey, submission: pendingSubmission },
-        { silent: true },
+        { originInstanceId: screenInstanceIdRef.current },
       );
+      submissionStatusRef.current = pendingSubmission.status;
       setSubmission(pendingSubmission);
 
       let settledInStore = false;
@@ -497,7 +562,7 @@ export function SessionChatScreen({
         if (!scopeStillValid) {
           settledInStore = true;
           clearUnresolvedSubmission(credentialCache, dispatchScopeKey, {
-            silent: true,
+            originInstanceId: screenInstanceIdRef.current,
           });
           return;
         }
@@ -508,27 +573,37 @@ export function SessionChatScreen({
               preserveUnknown: retryFromStatus === 'unknown',
             });
 
-        const stillOnSameScreenAndUnlocked =
-          mountedRef.current &&
-          sessionEpochRef.current === dispatchEpoch &&
-          (currentSessionIdRef.current?.trim() ?? '') === targetSessionId &&
-          credentialCache.getCachedCredentials(apiClient, dispatchServerUrl) !==
-            null;
-
         if (nextSubmission.status === 'unknown') {
           saveUnresolvedSubmission(
             credentialCache,
             { ...dispatchScopeKey, submission: nextSubmission },
-            { silent: stillOnSameScreenAndUnlocked },
+            { originInstanceId: screenInstanceIdRef.current },
           );
         } else {
           clearUnresolvedSubmission(credentialCache, dispatchScopeKey, {
-            silent: stillOnSameScreenAndUnlocked,
+            originInstanceId: screenInstanceIdRef.current,
+            resolvedDelivered: nextSubmission.status === 'delivered',
           });
         }
         settledInStore = true;
+        if (
+          getInFlightSubmissionRequestId(credentialCache, dispatchScopeKey) ===
+          requestId
+        ) {
+          setUnresolvedSubmissionInFlight(
+            credentialCache,
+            dispatchScopeKey,
+            null,
+          );
+        }
 
-        if (!stillOnSameScreenAndUnlocked) {
+        const stillSameSessionAndUnlocked =
+          mountedRef.current &&
+          (currentSessionIdRef.current?.trim() ?? '') === targetSessionId &&
+          credentialCache.getCachedCredentials(apiClient, dispatchServerUrl) !==
+            null;
+
+        if (!stillSameSessionAndUnlocked) {
           if (
             mountedRef.current &&
             sessionEpochRef.current === dispatchEpoch &&
@@ -540,16 +615,46 @@ export function SessionChatScreen({
           return;
         }
 
+        if (sessionEpochRef.current !== dispatchEpoch) {
+          // Re-read the shared store because originInstanceId suppresses
+          // self-notifications when a new session epoch (e.g. background -> unlock)
+          // restored the pending submission on this same screen instance. If the
+          // store has no record (definitive failure or delivery), fall through to
+          // apply this dispatch's actual outcome instead of wiping it.
+          const latestRecord = getUnresolvedSubmission(
+            credentialCache,
+            dispatchScopeKey,
+          );
+          if (latestRecord) {
+            syncRecordToScreen(latestRecord, dispatchScopeKey);
+            return;
+          }
+        }
+
+        submissionStatusRef.current = nextSubmission.status;
         setSubmission(nextSubmission);
         if (nextSubmission.status === 'delivered') {
           setDraftText('');
           setDraftRequestId(createClientRequestId(now()));
           triggerPostSendRefresh();
-        } else if (!retryFromStatus && nextSubmission.status === 'failed') {
+        } else if (
+          nextSubmission.status === 'failed' &&
+          (!retryFromStatus || sessionEpochRef.current !== dispatchEpoch)
+        ) {
           // Keep the failed draft text so user can edit or discard cleanly.
           setDraftText(trimmed);
         }
       } finally {
+        if (
+          getInFlightSubmissionRequestId(credentialCache, dispatchScopeKey) ===
+          requestId
+        ) {
+          setUnresolvedSubmissionInFlight(
+            credentialCache,
+            dispatchScopeKey,
+            null,
+          );
+        }
         if (
           !settledInStore &&
           apiClient.getCredentialGeneration() === dispatchGeneration
@@ -560,20 +665,27 @@ export function SessionChatScreen({
             submittedText: trimmed,
             message: `Delivery outcome is unknown because sending did not complete cleanly. ${UNKNOWN_RETRY_GUIDANCE}`,
           };
-          saveUnresolvedSubmission(credentialCache, {
-            ...dispatchScopeKey,
-            submission: fallbackUnknown,
-          });
-        }
-        if (
-          getInFlightSubmissionRequestId(credentialCache, dispatchScopeKey) ===
-          requestId
-        ) {
-          setUnresolvedSubmissionInFlight(
+          saveUnresolvedSubmission(
             credentialCache,
-            dispatchScopeKey,
-            null,
+            {
+              ...dispatchScopeKey,
+              submission: fallbackUnknown,
+            },
+            { originInstanceId: screenInstanceIdRef.current },
           );
+          if (
+            mountedRef.current &&
+            (currentSessionIdRef.current?.trim() ?? '') === targetSessionId &&
+            credentialCache.getCachedCredentials(
+              apiClient,
+              dispatchServerUrl,
+            ) !== null
+          ) {
+            syncRecordToScreen(
+              getUnresolvedSubmission(credentialCache, dispatchScopeKey),
+              dispatchScopeKey,
+            );
+          }
         }
         if (sessionEpochRef.current === dispatchEpoch) {
           submitLockRef.current = false;
@@ -588,6 +700,7 @@ export function SessionChatScreen({
       isAuthPaused,
       now,
       rawSessionId,
+      syncRecordToScreen,
       triggerPostSendRefresh,
     ],
   );
@@ -660,7 +773,7 @@ export function SessionChatScreen({
     }
     if (restoreScopeKey) {
       clearUnresolvedSubmission(credentialCache, restoreScopeKey, {
-        silent: true,
+        originInstanceId: screenInstanceIdRef.current,
       });
     }
     setSubmission(null);
@@ -1155,9 +1268,17 @@ export function SessionChatScreen({
               <Text
                 style={styles.signalsText}
                 testID="session-chat-window-text">
-                {activeSnapshot.historyHasMore
-                  ? 'Recent window (up to 20 exchanges; earlier turns not loaded)'
-                  : 'Recent window (up to 20 exchanges)'}
+                {!activeSnapshot.historyAvailable
+                  ? activeSnapshot.historySource === 'screen'
+                    ? 'Screen snapshot unavailable'
+                    : 'Recent window unavailable'
+                  : activeSnapshot.historySource === 'screen'
+                    ? activeSnapshot.historyHasMore
+                      ? 'Screen snapshot (incomplete — page limit reached)'
+                      : 'Screen snapshot (current snapshot loaded)'
+                    : activeSnapshot.historyHasMore
+                      ? 'Recent window (up to 20 exchanges; incomplete — newer items omitted)'
+                      : 'Recent window (up to 20 exchanges)'}
               </Text>
             </View>
 

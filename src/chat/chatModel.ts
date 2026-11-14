@@ -29,7 +29,6 @@ export interface SessionChatSnapshot {
   historyItems: SessionHistoryItem[];
   historyHasMore: boolean;
   historyMessage?: string;
-  historyCursor?: string;
   outputAvailable: boolean;
   outputStatus: 'live' | 'unavailable';
   outputText: string | null;
@@ -206,93 +205,91 @@ export function mergeTranscriptItems(
   return result;
 }
 
-interface TranscriptCursorMeta {
-  offset: number | null;
-  file: string | null;
-  head: string | null;
+export interface ScreenCursorMeta {
+  line: number | null;
+  fingerprint: string | null;
 }
 
-function parseTranscriptCursorMeta(cursor?: string): TranscriptCursorMeta {
+export function parseScreenCursorMeta(cursor?: string): ScreenCursorMeta {
   if (!cursor) {
-    return { offset: null, file: null, head: null };
+    return { line: null, fingerprint: null };
   }
-  const trimmed = cursor.trim();
-  const offsetMatch = /^offset:(\d+)(?::|$)/.exec(trimmed);
-  const fileMatch = /(?:^|:)file:([^:]+)/.exec(trimmed);
-  const headMatch = /(?:^|:)head:([^:]+)/.exec(trimmed);
-  const offset = offsetMatch ? Number.parseInt(offsetMatch[1], 10) : null;
+  const match = /^line:(\d+)(?::fp:(.+))?$/.exec(cursor.trim());
+  if (!match) {
+    return { line: null, fingerprint: null };
+  }
+  const line = Number.parseInt(match[1], 10);
   return {
-    offset: offset !== null && Number.isFinite(offset) && offset >= 0 ? offset : null,
-    file: fileMatch?.[1]?.trim() || null,
-    head: headMatch?.[1]?.trim() || null,
+    line: Number.isFinite(line) && line >= 0 ? line : null,
+    fingerprint: match[2]?.trim() || null,
   };
 }
 
 /**
- * Detects when a transcript cursor indicates a stream reset/replacement rather
- * than a strictly forward continuation (file rotation, head fingerprint change,
- * backwards byte offset, or reset to offset 0).
+ * Detects when a `screen`-source continuation page restarted within the same
+ * cycle (cursor `line:0`, fingerprint change/addition/removal, backwards line
+ * cursor, or overlapping item IDs) rather than continuing the in-progress
+ * multi-page snapshot drain.
  */
-export function didTranscriptCursorReset(params: {
+export function didScreenCursorRestart(params: {
   prevCursor?: string;
   nextCursor?: string;
+  prevItems: readonly SessionHistoryItem[];
+  nextItems: readonly SessionHistoryItem[];
 }): boolean {
-  const { prevCursor, nextCursor } = params;
-  if (!prevCursor || !nextCursor) {
-    return false;
-  }
-  const prevMeta = parseTranscriptCursorMeta(prevCursor);
-  const nextMeta = parseTranscriptCursorMeta(nextCursor);
+  const { prevCursor, nextCursor, prevItems, nextItems } = params;
+  const prevMeta = parseScreenCursorMeta(prevCursor);
+  const nextMeta = parseScreenCursorMeta(nextCursor);
 
-  if (prevMeta.file && nextMeta.file && prevMeta.file !== nextMeta.file) {
+  if (nextCursor === 'line:0' || nextMeta.line === 0) {
     return true;
   }
-  if (prevMeta.head && nextMeta.head && prevMeta.head !== nextMeta.head) {
-    return true;
-  }
-  if (prevMeta.head !== null && nextMeta.head === null && nextMeta.offset === 0) {
-    return true;
-  }
-  if (prevMeta.offset !== null && nextMeta.offset !== null) {
-    if (nextMeta.offset < prevMeta.offset) {
-      return true;
-    }
-    if (nextMeta.offset === 0 && prevCursor.trim() !== nextCursor.trim()) {
-      return true;
-    }
-  }
+
   if (
-    prevMeta.offset === null &&
-    nextMeta.offset === 0 &&
-    prevCursor.trim() !== nextCursor.trim()
+    prevMeta.fingerprint !== null &&
+    nextMeta.fingerprint !== null &&
+    nextMeta.fingerprint !== prevMeta.fingerprint
   ) {
     return true;
   }
+
+  if (
+    (prevMeta.fingerprint === null) !== (nextMeta.fingerprint === null) &&
+    (nextMeta.fingerprint !== null || nextMeta.line !== null)
+  ) {
+    return true;
+  }
+
+  if (
+    prevMeta.line !== null &&
+    nextMeta.line !== null &&
+    nextMeta.line < prevMeta.line
+  ) {
+    return true;
+  }
+
+  if (prevItems.length > 0 && nextItems.length > 0) {
+    const existingIds = new Set(prevItems.map(item => item.id));
+    if (nextItems.some(item => existingIds.has(item.id))) {
+      return true;
+    }
+  }
+
   return false;
 }
 
 /**
- * Applies a `/history` response on top of the previous chat snapshot according to
- * verified backend cursor semantics:
- * - `transcript` forward polls append/update deltas by stable item ID, unless
- *   the cursor resets (file/head change, backwards offset, or reset to 0),
- *   in which case the cached transcript history is replaced cleanly.
- * - `screen` forward polls return `items: []` with `hasMore: false` when the
- *   fingerprint is unchanged (keep existing screen items), or restart from line 0
- *   with the full updated snapshot when screen lines changed (replace items).
- * - Initial / non-cursor `recent_exchanges` polls replace the recent window.
+ * Atomically converts a cycle's drained `/history` response into snapshot state.
+ * Poll cycles always fetch the recent window (or current screen snapshot)
+ * fresh without carrying cursors across cycles, so completed results replace
+ * prior cached history rather than merging across polls.
  */
-export function applyHistoryFetchResult(
-  previous: SessionChatSnapshot | null,
-  response: SessionHistoryResponse,
-  usedCursor: boolean,
-): {
+export function applyHistoryFetchResult(response: SessionHistoryResponse): {
   historyAvailable: boolean;
   historySource: 'transcript' | 'screen';
   historyItems: SessionHistoryItem[];
   historyHasMore: boolean;
   historyMessage?: string;
-  historyCursor?: string;
 } {
   if (!response.available) {
     return {
@@ -301,60 +298,15 @@ export function applyHistoryFetchResult(
       historyItems: [],
       historyHasMore: false,
       historyMessage: response.message,
-      historyCursor: undefined,
     };
   }
-
-  const sameLiveSource =
-    previous !== null &&
-    previous.historyAvailable &&
-    previous.historySource === response.source;
-
-  if (response.source === 'screen') {
-    const cursorMatchesPrevious =
-      Boolean(previous?.historyCursor) &&
-      response.cursor !== undefined &&
-      response.cursor === previous?.historyCursor &&
-      response.cursor !== 'line:0';
-    const screenUnchanged =
-      usedCursor &&
-      sameLiveSource &&
-      cursorMatchesPrevious &&
-      response.items.length === 0 &&
-      !response.hasMore;
-    return {
-      historyAvailable: true,
-      historySource: 'screen',
-      historyItems: screenUnchanged ? [...previous.historyItems] : [...response.items],
-      historyHasMore: Boolean(response.hasMore),
-      historyMessage: response.message,
-      historyCursor: response.cursor,
-    };
-  }
-
-  const resetDetected =
-    usedCursor &&
-    sameLiveSource &&
-    didTranscriptCursorReset({
-      prevCursor: previous.historyCursor,
-      nextCursor: response.cursor,
-    });
-
-  const nextItems =
-    usedCursor && sameLiveSource && !resetDetected
-      ? mergeTranscriptItems(previous.historyItems, response.items)
-      : [...response.items];
 
   return {
     historyAvailable: true,
-    historySource: 'transcript',
-    historyItems: nextItems,
-    historyHasMore:
-      usedCursor && sameLiveSource && !resetDetected
-        ? previous.historyHasMore || Boolean(response.hasMore)
-        : Boolean(response.hasMore),
+    historySource: response.source,
+    historyItems: [...response.items],
+    historyHasMore: Boolean(response.hasMore),
     historyMessage: response.message,
-    historyCursor: response.cursor,
   };
 }
 
@@ -994,14 +946,25 @@ export interface UnresolvedSubmissionRecord {
   submission: ComposerSubmission;
 }
 
+export interface UnresolvedSubmissionChangeEvent {
+  resolvedDelivered: boolean;
+  originInstanceId?: string;
+}
+
 type UnresolvedSubmissionListener = (
   record: UnresolvedSubmissionRecord | null,
+  event: UnresolvedSubmissionChangeEvent,
 ) => void;
+
+interface SubscriberEntry {
+  instanceId?: string;
+  listener: UnresolvedSubmissionListener;
+}
 
 interface ScopedUnresolvedState {
   records: Map<string, UnresolvedSubmissionRecord>;
   inFlightRequestIds: Map<string, string>;
-  listeners: Map<string, Set<UnresolvedSubmissionListener>>;
+  listeners: Map<string, Set<SubscriberEntry>>;
 }
 
 const unresolvedSubmissionScopes = new WeakMap<object, ScopedUnresolvedState>();
@@ -1027,13 +990,21 @@ function notifyUnresolvedListeners(
   state: ScopedUnresolvedState,
   storageKey: string,
   record: UnresolvedSubmissionRecord | null,
+  event: UnresolvedSubmissionChangeEvent,
 ): void {
   const listeners = state.listeners.get(storageKey);
   if (!listeners || listeners.size === 0) {
     return;
   }
-  for (const listener of Array.from(listeners)) {
-    listener(record);
+  for (const entry of Array.from(listeners)) {
+    if (
+      event.originInstanceId &&
+      entry.instanceId &&
+      event.originInstanceId === entry.instanceId
+    ) {
+      continue;
+    }
+    entry.listener(record, event);
   }
 }
 
@@ -1041,12 +1012,13 @@ function notifyUnresolvedListeners(
  * Stores a `pending` or `unknown` submission strictly in memory scoped to the
  * given credential cache, credential generation, server URL, and session ID.
  * Hiding or backgrounding the app clears visible UI state without discarding
- * this record so the same session can restore it on unlock.
+ * this record so the same session can restore it on unlock or focus across
+ * screen instances.
  */
 export function saveUnresolvedSubmission(
   scope: object,
   record: UnresolvedSubmissionRecord,
-  options?: { silent?: boolean },
+  options?: { originInstanceId?: string },
 ): void {
   if (
     record.submission.status !== 'pending' &&
@@ -1061,9 +1033,10 @@ export function saveUnresolvedSubmission(
     submission: { ...record.submission },
   };
   state.records.set(storageKey, nextRecord);
-  if (!options?.silent) {
-    notifyUnresolvedListeners(state, storageKey, nextRecord);
-  }
+  notifyUnresolvedListeners(state, storageKey, nextRecord, {
+    resolvedDelivered: false,
+    originInstanceId: options?.originInstanceId,
+  });
 }
 
 export function getUnresolvedSubmission(
@@ -1086,7 +1059,7 @@ export function getUnresolvedSubmission(
 export function clearUnresolvedSubmission(
   scope: object,
   key: UnresolvedSubmissionScopeKey,
-  options?: { silent?: boolean },
+  options?: { originInstanceId?: string; resolvedDelivered?: boolean },
 ): void {
   const state = unresolvedSubmissionScopes.get(scope);
   if (!state) {
@@ -1094,8 +1067,11 @@ export function clearUnresolvedSubmission(
   }
   const storageKey = buildUnresolvedScopeKey(key);
   const existed = state.records.delete(storageKey);
-  if (existed && !options?.silent) {
-    notifyUnresolvedListeners(state, storageKey, null);
+  if (existed) {
+    notifyUnresolvedListeners(state, storageKey, null, {
+      resolvedDelivered: Boolean(options?.resolvedDelivered),
+      originInstanceId: options?.originInstanceId,
+    });
   }
 }
 
@@ -1108,7 +1084,45 @@ export function clearAllUnresolvedSubmissions(scope: object): void {
   state.records.clear();
   state.inFlightRequestIds.clear();
   for (const storageKey of keys) {
-    notifyUnresolvedListeners(state, storageKey, null);
+    notifyUnresolvedListeners(state, storageKey, null, {
+      resolvedDelivered: false,
+    });
+  }
+}
+
+/**
+ * Drops unresolved submission records from obsolete credential generations or
+ * server URLs while leaving active-generation records of other chats intact.
+ */
+export function pruneObsoleteUnresolvedSubmissions(
+  scope: object,
+  active: { credentialGeneration: number; serverUrl: string },
+): void {
+  const state = unresolvedSubmissionScopes.get(scope);
+  if (!state) {
+    return;
+  }
+  const obsoleteKeys: string[] = [];
+  for (const [storageKey, record] of state.records.entries()) {
+    if (
+      record.credentialGeneration !== active.credentialGeneration ||
+      record.serverUrl !== active.serverUrl
+    ) {
+      obsoleteKeys.push(storageKey);
+    }
+  }
+  for (const storageKey of obsoleteKeys) {
+    state.records.delete(storageKey);
+    state.inFlightRequestIds.delete(storageKey);
+    notifyUnresolvedListeners(state, storageKey, null, {
+      resolvedDelivered: false,
+    });
+  }
+  const activePrefix = `${active.credentialGeneration}\u0000${active.serverUrl}\u0000`;
+  for (const storageKey of Array.from(state.inFlightRequestIds.keys())) {
+    if (!storageKey.startsWith(activePrefix)) {
+      state.inFlightRequestIds.delete(storageKey);
+    }
   }
 }
 
@@ -1141,6 +1155,7 @@ export function subscribeUnresolvedSubmission(
   scope: object,
   key: UnresolvedSubmissionScopeKey,
   listener: UnresolvedSubmissionListener,
+  instanceId?: string,
 ): () => void {
   const state = getOrCreateUnresolvedState(scope);
   const storageKey = buildUnresolvedScopeKey(key);
@@ -1149,13 +1164,14 @@ export function subscribeUnresolvedSubmission(
     set = new Set();
     state.listeners.set(storageKey, set);
   }
-  set.add(listener);
+  const entry: SubscriberEntry = { instanceId, listener };
+  set.add(entry);
   return () => {
     const existing = state.listeners.get(storageKey);
     if (!existing) {
       return;
     }
-    existing.delete(listener);
+    existing.delete(entry);
     if (existing.size === 0) {
       state.listeners.delete(storageKey);
     }

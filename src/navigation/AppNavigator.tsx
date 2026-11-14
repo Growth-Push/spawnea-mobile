@@ -173,6 +173,7 @@ function SessionsStackNavigator({
       </SessionsStack.Screen>
       <SessionsStack.Screen
         name="SessionChat"
+        getId={({ params }) => params?.sessionId?.trim() || 'default'}
         options={{ title: 'Session / Chat', headerShown: false }}>
         {props => (
           <SessionChatScreen {...props} onOpenSettings={onOpenSettings} />

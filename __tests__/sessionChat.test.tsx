@@ -22,16 +22,17 @@ import type {
 import {
   applyHistoryFetchResult,
   createClientRequestId,
-  didTranscriptCursorReset,
   evaluateRetryGate,
   evaluateSendGate,
   formatItemTimestamp,
+  getUnresolvedSubmission,
   groupHistoryItemsByTurn,
   isScrollNearBottom,
   mapSendFailureToSubmission,
   mapSendResponseToSubmission,
   mergeTranscriptItems,
-  SessionChatSnapshot,
+  pruneObsoleteUnresolvedSubmissions,
+  saveUnresolvedSubmission,
   sliceOutputTail,
 } from '../src/chat/chatModel';
 import { SessionChatScreen } from '../src/screens/SessionChatScreen';
@@ -343,125 +344,71 @@ describe('chatModel pure helpers', () => {
     expect(formatItemTimestamp('invalid-date')).toBeNull();
   });
 
-  test('(FIXTURE) applyHistoryFetchResult handles transcript cursor merge and screen fingerprint semantics', () => {
-    const baseSnapshot: SessionChatSnapshot = {
-      session: makeSessionFixture({ id: 'sess-fixture-1' }),
-      historyAvailable: true,
-      historySource: 'transcript',
-      historyItems: [
-        {
-          id: 'm1',
-          role: 'user',
-          source: 'transcript',
-          text: 'hi',
-          turnId: 't1',
-          turnBoundary: 'start',
-        },
+  test('(FIXTURE) applyHistoryFetchResult atomically replaces transcript/screen results and clears unavailable responses', () => {
+    const replacedTranscript = applyHistoryFetchResult({
+      apiVersion: 'v1',
+      sessionId: 'sess-fixture-1',
+      available: true,
+      source: 'transcript',
+      items: [
         {
           id: 'm2',
           role: 'agent',
           source: 'transcript',
           text: 'working',
           turnId: 't1',
+          turnBoundary: 'end',
+        },
+        {
+          id: 'm3',
+          role: 'user',
+          source: 'transcript',
+          text: 'next',
+          turnId: 't2',
+          turnBoundary: 'single',
         },
       ],
-      historyHasMore: true,
-      historyCursor: 'c1',
-      outputAvailable: true,
-      outputStatus: 'live',
-      outputText: 'ok',
-      lastFetchedAtMs: 1000,
-      serverUrl: TEST_URL,
-      credentialGeneration: 0,
-    };
-
-    const updatedTranscript = applyHistoryFetchResult(
-      baseSnapshot,
-      {
-        apiVersion: 'v1',
-        sessionId: 'sess-fixture-1',
-        available: true,
-        source: 'transcript',
-        items: [
-          {
-            id: 'm2',
-            role: 'agent',
-            source: 'transcript',
-            text: 'working',
-            turnId: 't1',
-            turnBoundary: 'end',
-          },
-          {
-            id: 'm3',
-            role: 'user',
-            source: 'transcript',
-            text: 'next',
-            turnId: 't2',
-            turnBoundary: 'single',
-          },
-        ],
-        hasMore: false,
-        cursor: 'c2',
-      },
-      true,
-    );
-    expect(updatedTranscript.historyItems.map(i => i.id)).toEqual([
-      'm1',
+      hasMore: false,
+      cursor: 'c2',
+    });
+    expect(replacedTranscript.historyAvailable).toBe(true);
+    expect(replacedTranscript.historySource).toBe('transcript');
+    expect(replacedTranscript.historyItems.map(i => i.id)).toEqual([
       'm2',
       'm3',
     ]);
-    expect(updatedTranscript.historyItems[1].turnBoundary).toBe('end');
-    expect(updatedTranscript.historyCursor).toBe('c2');
+    expect(replacedTranscript.historyHasMore).toBe(false);
 
-    const screenSnapshot: SessionChatSnapshot = {
-      ...baseSnapshot,
-      historySource: 'screen',
-      historyItems: [
-        { id: 'screen-1', role: 'agent', source: 'screen', text: '$ pwd' },
+    const unavailable = applyHistoryFetchResult({
+      apiVersion: 'v1',
+      sessionId: 'sess-fixture-1',
+      available: false,
+      source: 'screen',
+      items: [],
+      hasMore: false,
+      message: 'Terminal closed',
+    });
+    expect(unavailable.historyAvailable).toBe(false);
+    expect(unavailable.historyItems).toEqual([]);
+    expect(unavailable.historyMessage).toBe('Terminal closed');
+
+    const replacedScreen = applyHistoryFetchResult({
+      apiVersion: 'v1',
+      sessionId: 'sess-fixture-1',
+      available: true,
+      source: 'screen',
+      items: [
+        {
+          id: 'screen-1',
+          role: 'agent',
+          source: 'screen',
+          text: '$ pwd\n/workspace',
+        },
       ],
-      historyCursor: 'line:1:fp:abcd',
-    };
-
-    // Unchanged cursor delta on screen source returns empty array -> keep cached snapshot.
-    const unchangedScreen = applyHistoryFetchResult(
-      screenSnapshot,
-      {
-        apiVersion: 'v1',
-        sessionId: 'sess-fixture-1',
-        available: true,
-        source: 'screen',
-        items: [],
-        hasMore: false,
-        cursor: 'line:1:fp:abcd',
-      },
-      true,
-    );
-    expect(unchangedScreen.historyItems).toEqual([
-      { id: 'screen-1', role: 'agent', source: 'screen', text: '$ pwd' },
-    ]);
-
-    // Changed fingerprint resets to line 0 and replaces items.
-    const changedScreen = applyHistoryFetchResult(
-      screenSnapshot,
-      {
-        apiVersion: 'v1',
-        sessionId: 'sess-fixture-1',
-        available: true,
-        source: 'screen',
-        items: [
-          {
-            id: 'screen-1',
-            role: 'agent',
-            source: 'screen',
-            text: '$ pwd\n/workspace',
-          },
-        ],
-        hasMore: false,
-        cursor: 'line:2:fp:ef01',
-      },
-      true,
-    );
-    expect(changedScreen.historyItems).toEqual([
+      hasMore: false,
+      cursor: 'line:2:fp:ef01',
+    });
+    expect(replacedScreen.historyItems).toEqual([
       {
         id: 'screen-1',
         role: 'agent',
@@ -1560,59 +1507,18 @@ describe('Round 1 review & UX regression fixes (F1-F8)', () => {
     }
   });
 
-  test('(FIXTURE) F5 clears previous screen items when cleared terminal returns cursor line:0 while retaining identical fingerprint cursor', () => {
-    const populatedScreen: SessionChatSnapshot = {
-      session: makeSessionFixture({ id: 'sess-screen-1' }),
-      historyAvailable: true,
-      historySource: 'screen',
-      historyItems: [
-        {
-          id: 'screen-l1',
-          role: 'agent',
-          source: 'screen',
-          text: '$ ls\nREADME.md',
-        },
-      ],
-      historyHasMore: false,
-      historyCursor: 'line:2:fp:abcd1234',
-      outputAvailable: true,
-      outputStatus: 'live',
-      outputText: '$ ls\nREADME.md',
-      lastFetchedAtMs: 1000,
-      serverUrl: TEST_URL,
-      credentialGeneration: 0,
-    };
-
-    const retained = applyHistoryFetchResult(
-      populatedScreen,
-      {
-        apiVersion: 'v1',
-        sessionId: 'sess-screen-1',
-        available: true,
-        source: 'screen',
-        items: [],
-        hasMore: false,
-        cursor: 'line:2:fp:abcd1234',
-      },
-      true,
-    );
-    expect(retained.historyItems).toHaveLength(1);
-
-    const cleared = applyHistoryFetchResult(
-      populatedScreen,
-      {
-        apiVersion: 'v1',
-        sessionId: 'sess-screen-1',
-        available: true,
-        source: 'screen',
-        items: [],
-        hasMore: false,
-        cursor: 'line:0',
-      },
-      true,
-    );
+  test('(FIXTURE) F5 clears previous screen items when cleared terminal returns empty fresh snapshot', () => {
+    const cleared = applyHistoryFetchResult({
+      apiVersion: 'v1',
+      sessionId: 'sess-screen-1',
+      available: true,
+      source: 'screen',
+      items: [],
+      hasMore: false,
+      cursor: 'line:0',
+    });
     expect(cleared.historyItems).toEqual([]);
-    expect(cleared.historyCursor).toBe('line:0');
+    expect(cleared.historyHasMore).toBe(false);
   });
 
   test('(FIXTURE) F6 lifts composer padding when soft keyboard opens, clears on hide, and uses handled ScrollView taps', async () => {
@@ -2883,105 +2789,20 @@ describe('Final round fixes (K1, K2, J72-1, J72-2)', () => {
     }
   });
 
-  test('(FIXTURE) K2 detects transcript cursor reset and replaces cached history without stale or out-of-order items', async () => {
-    expect(
-      didTranscriptCursorReset({
-        prevCursor: 'offset:420:file:rollout-1.jsonl:head:aaaa1111',
-        nextCursor: 'offset:180:file:rollout-2.jsonl:head:bbbb2222',
-      }),
-    ).toBe(true);
-    expect(
-      didTranscriptCursorReset({
-        prevCursor: 'offset:420:file:rollout-1.jsonl:head:aaaa1111',
-        nextCursor: 'offset:420:file:rollout-1.jsonl:head:cccc3333',
-      }),
-    ).toBe(true);
-    expect(
-      didTranscriptCursorReset({
-        prevCursor: 'offset:420:file:rollout-1.jsonl:head:aaaa1111',
-        nextCursor: 'offset:100:file:rollout-1.jsonl:head:aaaa1111',
-      }),
-    ).toBe(true);
-    expect(
-      didTranscriptCursorReset({
-        prevCursor: 'offset:420:file:rollout-1.jsonl:head:aaaa1111',
-        nextCursor: 'offset:0:file:rollout-1.jsonl',
-      }),
-    ).toBe(true);
-    expect(
-      didTranscriptCursorReset({
-        prevCursor: 'offset:420:file:rollout-1.jsonl:head:aaaa1111',
-        nextCursor: 'offset:512:file:rollout-1.jsonl:head:aaaa1111',
-      }),
-    ).toBe(false);
-
-    const prevSnapshot: SessionChatSnapshot = {
-      session: makeSessionFixture(),
-      historyAvailable: true,
-      historySource: 'transcript',
-      historyItems: [
-        {
-          id: 'old-1',
-          role: 'user',
-          source: 'transcript',
-          text: 'stale first message',
-        },
-        {
-          id: 'old-2',
-          role: 'agent',
-          source: 'transcript',
-          text: 'stale second message',
-        },
-      ],
-      historyHasMore: true,
-      historyCursor: 'offset:500:file:rollout-1.jsonl:head:aaaa1111',
-      outputAvailable: true,
-      outputStatus: 'live',
-      outputText: '',
-      lastFetchedAtMs: 1000,
-      serverUrl: TEST_URL,
-      credentialGeneration: 1,
-    };
-
-    const emptyReplaced = applyHistoryFetchResult(
-      prevSnapshot,
-      {
-        apiVersion: 'v1',
-        sessionId: prevSnapshot.session.id,
-        available: true,
-        source: 'transcript',
-        hasMore: false,
-        cursor: 'offset:0:file:rollout-1.jsonl',
-        items: [],
-      },
-      true,
-    );
+  test('(FIXTURE) K2 fresh-window poll replaces cached transcript cleanly when file resets or empties without stale/out-of-order items', async () => {
+    const emptyReplaced = applyHistoryFetchResult({
+      apiVersion: 'v1',
+      sessionId: 'sess-fixture-codex-1',
+      available: true,
+      source: 'transcript',
+      hasMore: false,
+      cursor: 'offset:0:file:rollout-1.jsonl',
+      items: [],
+    });
     expect(emptyReplaced.historyItems).toEqual([]);
     expect(emptyReplaced.historyHasMore).toBe(false);
 
-    const fileReplaced = applyHistoryFetchResult(
-      prevSnapshot,
-      {
-        apiVersion: 'v1',
-        sessionId: prevSnapshot.session.id,
-        available: true,
-        source: 'transcript',
-        hasMore: false,
-        cursor: 'offset:120:file:rollout-2.jsonl:head:bbbb2222',
-        items: [
-          {
-            id: 'new-1',
-            role: 'user',
-            source: 'transcript',
-            text: 'fresh file start',
-          },
-        ],
-      },
-      true,
-    );
-    expect(fileReplaced.historyItems.map(i => i.id)).toEqual(['new-1']);
-
-    // End-to-end Screen cursor poll + multi-page continuation reset proof
+    // End-to-end fresh-window poll + single-cycle multi-page drain replacement
     jest.useFakeTimers();
     let phase: 'initial' | 'poll_reset' = 'initial';
     const request = makeChatTransport({
@@ -3007,28 +2828,7 @@ describe('Final round fixes (K1, K2, J72-1, J72-2)', () => {
             }),
           };
         }
-        if (url.includes('rollout-a.jsonl')) {
-          return {
-            status: 200,
-            body: JSON.stringify({
-              apiVersion: 'v1',
-              sessionId: 'sess-fixture-codex-1',
-              available: true,
-              source: 'transcript',
-              hasMore: true,
-              cursor: 'offset:160:file:rollout-b.jsonl:head:2222',
-              items: [
-                {
-                  id: 't-stale-page1',
-                  role: 'agent',
-                  source: 'transcript',
-                  text: 'STALE MID-DRAIN PAGE 1',
-                },
-              ],
-            }),
-          };
-        }
-        if (url.includes('rollout-b.jsonl')) {
+        if (!url.includes('cursor=')) {
           return {
             status: 200,
             body: JSON.stringify({
@@ -3083,7 +2883,6 @@ describe('Final round fixes (K1, K2, J72-1, J72-2)', () => {
       });
       const updatedText = getAllText(renderer);
       expect(updatedText).not.toContain('STALE LIVE TURN');
-      expect(updatedText).not.toContain('STALE MID-DRAIN PAGE 1');
       expect(updatedText.indexOf('FRESH ORDER 1')).toBeGreaterThan(-1);
       expect(updatedText.indexOf('FRESH ORDER 2')).toBeGreaterThan(
         updatedText.indexOf('FRESH ORDER 1'),
@@ -3494,6 +3293,1633 @@ describe('Final round fixes (K1, K2, J72-1, J72-2)', () => {
       expect(sub.message).toContain('while the desktop app stays running');
       expect(sub.message).toContain('desktop restart loses that protection');
       expect(sub.message).toContain('check the conversation before retrying');
+    }
+  });
+});
+
+describe('Round 6 review fixes (J72-3, C1)', () => {
+  test('(FIXTURE) J72-3: unavailable screen history never claims snapshot is loaded', async () => {
+    const request = makeChatTransport({
+      session: makeSessionFixture({
+        id: 'sess-screen-unavail-1',
+        harness: { id: 'shell', name: 'Shell', command: 'zsh' },
+        status: 'needs_input',
+      }),
+      historyHandler: () => ({
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessionId: 'sess-screen-unavail-1',
+          available: false,
+          source: 'screen',
+          items: [],
+          hasMore: false,
+          message: 'Capture unavailable',
+        }),
+      }),
+    });
+
+    const { renderer, cache } = await renderUnlockedChatScreen({
+      sessionId: 'sess-screen-unavail-1',
+      request,
+    });
+
+    try {
+      const text = getAllText(renderer);
+      expect(text).toContain('History unavailable');
+      expect(text).toContain('Capture unavailable');
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-window-text' }).props
+          .children,
+      ).toBe('Screen snapshot unavailable');
+      expect(text).not.toMatch(/current snapshot loaded/i);
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('(FIXTURE) C1: unresolved send is shared across chat instances for the same session and blocks a second request ID', async () => {
+    mockConfiguredKeystore();
+    const sentBodies: Array<{ clientRequestId: string }> = [];
+    let failSecondAttempt = true;
+    let idCounter = 1;
+    const fakeNow = () => 1_760_000_000_000 + idCounter++ * 1000;
+
+    const request = makeChatTransport({
+      session: makeSessionFixture({
+        id: 'sess-shared-c1',
+        status: 'idle',
+        harness: { id: 'codex', name: 'Codex', command: 'codex' },
+      }),
+      messageHandler: async req => {
+        const parsed = JSON.parse(String(req.body ?? '{}')) as {
+          clientRequestId: string;
+        };
+        sentBodies.push(parsed);
+        if (failSecondAttempt) {
+          throw new Error('Request timed out');
+        }
+        return {
+          status: 202,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-shared-c1',
+            delivered: true,
+            deliveryMethod: 'submit',
+            replayed: true,
+            status: 'delivered',
+          } satisfies SendMessageResponse),
+        };
+      },
+    });
+
+    const apiClient = new SpawneaApiClient({
+      transport: { request: request as never },
+      allowDebugLoopback: true,
+      now: fakeNow,
+    });
+    const cache = new SessionCredentialCache();
+    await cache.unlockAndGetCredentials({
+      apiClient,
+      allowDebugLoopback: true,
+    });
+
+    const createNav = (initiallyFocused: boolean) => {
+      let focused = initiallyFocused;
+      const listeners = new Map<string, Set<() => void>>();
+      return {
+        isFocused: () => focused,
+        addListener: (event: string, cb: () => void) => {
+          const set = listeners.get(event) ?? new Set();
+          set.add(cb);
+          listeners.set(event, set);
+          return () => set.delete(cb);
+        },
+        emit: (event: string) => {
+          if (event === 'focus') {
+            focused = true;
+          } else if (event === 'blur') {
+            focused = false;
+          }
+          for (const cb of listeners.get(event) ?? []) {
+            cb();
+          }
+        },
+      };
+    };
+
+    const nav1 = createNav(true);
+    const nav2 = createNav(true);
+
+    let r1!: ReactTestRenderer.ReactTestRenderer;
+    let r2!: ReactTestRenderer.ReactTestRenderer;
+
+    await ReactTestRenderer.act(async () => {
+      r1 = ReactTestRenderer.create(
+        <SessionChatScreen
+          route={{ params: { sessionId: 'sess-shared-c1' } }}
+          navigation={nav1}
+          credentialCache={cache}
+          apiClient={apiClient}
+          allowDebugLoopback={true}
+          pollIntervalMs={60_000}
+          now={fakeNow}
+        />,
+      );
+      await flushAsync(10);
+    });
+
+    try {
+      // Simulate navigating away from instance 1 and opening a second instance
+      await ReactTestRenderer.act(async () => {
+        nav1.emit('blur');
+        await flushAsync(4);
+      });
+      await ReactTestRenderer.act(async () => {
+        r2 = ReactTestRenderer.create(
+          <SessionChatScreen
+            route={{ params: { sessionId: 'sess-shared-c1' } }}
+            navigation={nav2}
+            credentialCache={cache}
+            apiClient={apiClient}
+            allowDebugLoopback={true}
+            pollIntervalMs={60_000}
+            now={fakeNow}
+          />,
+        );
+        await flushAsync(10);
+      });
+
+      // Instance 2 sends a message and receives a network timeout -> unknown
+      await ReactTestRenderer.act(async () => {
+        r2.root
+          .findByProps({ testID: 'session-chat-input' })
+          .props.onChangeText('First prompt from stack copy');
+        await flushAsync(4);
+      });
+      await ReactTestRenderer.act(async () => {
+        r2.root
+          .findByProps({ testID: 'session-chat-send-button' })
+          .props.onPress();
+        await flushAsync(12);
+      });
+
+      expect(sentBodies).toHaveLength(1);
+      const firstId = sentBodies[0].clientRequestId;
+      expect(getAllText(r2)).toContain('Delivery unknown');
+
+      // Instance 1 was already mounted before returning to foreground
+      await ReactTestRenderer.act(async () => {
+        nav2.emit('blur');
+        nav1.emit('focus');
+        await flushAsync(10);
+      });
+
+      // Instance 1 now shows the unresolved state & locks composer; pressing Send refuses a second ID
+      expect(getAllText(r1)).toContain('Delivery unknown');
+      expect(
+        r1.root.findByProps({ testID: 'session-chat-input' }).props.editable,
+      ).toBe(false);
+      await ReactTestRenderer.act(async () => {
+        r1.root
+          .findByProps({ testID: 'session-chat-send-button' })
+          .props.onPress();
+        await flushAsync(6);
+      });
+      expect(sentBodies).toHaveLength(1);
+
+      // Retrying from instance 1 reuses the exact same clientRequestId and clears both instances
+      failSecondAttempt = false;
+      await ReactTestRenderer.act(async () => {
+        r1.root
+          .findByProps({ testID: 'session-chat-retry-send-button' })
+          .props.onPress();
+        await flushAsync(12);
+      });
+
+      expect(sentBodies).toHaveLength(2);
+      expect(sentBodies[1].clientRequestId).toBe(firstId);
+      expect(getAllText(r1)).not.toContain('Delivery unknown');
+      expect(getAllText(r2)).not.toContain('Delivery unknown');
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        r2?.unmount();
+        r1.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+});
+
+describe('Single-cycle recent-window sync (S1, J72-4) & P1 unresolved scoping', () => {
+  test('(FIXTURE) S1 fetches fresh recent window each cycle without carrying cursors, bounding history size', async () => {
+    jest.useFakeTimers();
+    let cycle = 0;
+    const historyUrls: string[] = [];
+
+    const request = makeChatTransport({
+      session: makeSessionFixture({ id: 'sess-s1-bound' }),
+      historyHandler: url => {
+        historyUrls.push(url);
+        if (cycle === 0) {
+          return {
+            status: 200,
+            body: JSON.stringify({
+              apiVersion: 'v1',
+              sessionId: 'sess-s1-bound',
+              available: true,
+              source: 'transcript',
+              cursor: 'cursor-cycle-0',
+              hasMore: false,
+              items: [
+                {
+                  id: 'old-turn-1',
+                  role: 'user',
+                  source: 'transcript',
+                  text: 'WINDOW_ITEM_OLD_1',
+                },
+                {
+                  id: 'old-turn-2',
+                  role: 'agent',
+                  source: 'transcript',
+                  text: 'WINDOW_ITEM_OLD_2',
+                },
+              ],
+            }),
+          };
+        }
+        return {
+          status: 200,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-s1-bound',
+            available: true,
+            source: 'transcript',
+            cursor: 'cursor-cycle-1',
+            hasMore: false,
+            items: [
+              {
+                id: 'new-turn-1',
+                role: 'user',
+                source: 'transcript',
+                text: 'WINDOW_ITEM_SLID_1',
+              },
+              {
+                id: 'new-turn-2',
+                role: 'agent',
+                source: 'transcript',
+                text: 'WINDOW_ITEM_SLID_2',
+              },
+            ],
+          }),
+        };
+      },
+    });
+
+    const { renderer, cache } = await renderUnlockedChatScreen({
+      sessionId: 'sess-s1-bound',
+      request,
+      pollIntervalMs: 5000,
+    });
+
+    try {
+      expect(getAllText(renderer)).toContain('WINDOW_ITEM_OLD_1');
+      expect(historyUrls.every(u => !u.includes('cursor='))).toBe(true);
+
+      cycle = 1;
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(5000);
+        await flushAsync(14);
+      });
+
+      const pollText = getAllText(renderer);
+      expect(pollText).not.toContain('WINDOW_ITEM_OLD_1');
+      expect(pollText).not.toContain('WINDOW_ITEM_OLD_2');
+      expect(pollText).toContain('WINDOW_ITEM_SLID_1');
+      expect(pollText).toContain('WINDOW_ITEM_SLID_2');
+      expect(historyUrls.every(u => !u.includes('cursor='))).toBe(true);
+
+      // Item count stays bounded to the window instead of accumulating old + new
+      const itemNodes = renderer.root.findAll(
+        node =>
+          typeof node.props?.testID === 'string' &&
+          node.props.testID.startsWith('session-chat-item-') &&
+          typeof node.type === 'string',
+      );
+      expect(itemNodes).toHaveLength(2);
+    } finally {
+      jest.useRealTimers();
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('(FIXTURE) S1 failure or incomplete continuation drain keeps previous cache marked stale without mixing', async () => {
+    jest.useFakeTimers();
+    let mode: 'initial' | 'fail_page2' | 'incomplete_cap' = 'initial';
+
+    const request = makeChatTransport({
+      session: makeSessionFixture({ id: 'sess-s1-stale' }),
+      historyHandler: url => {
+        if (mode === 'initial') {
+          return {
+            status: 200,
+            body: JSON.stringify({
+              apiVersion: 'v1',
+              sessionId: 'sess-s1-stale',
+              available: true,
+              source: 'transcript',
+              cursor: 'c-init',
+              hasMore: false,
+              items: [
+                {
+                  id: 'cached-1',
+                  role: 'agent',
+                  source: 'transcript',
+                  text: 'CACHED_COMPLETE_REPLY',
+                },
+              ],
+            }),
+          };
+        }
+        if (mode === 'fail_page2') {
+          if (!url.includes('cursor=')) {
+            return {
+              status: 200,
+              body: JSON.stringify({
+                apiVersion: 'v1',
+                sessionId: 'sess-s1-stale',
+                available: true,
+                source: 'transcript',
+                cursor: 'fail-p2',
+                hasMore: true,
+                items: [
+                  {
+                    id: 'partial-p1',
+                    role: 'agent',
+                    source: 'transcript',
+                    text: 'PARTIAL_FAIL_PAGE_1',
+                  },
+                ],
+              }),
+            };
+          }
+          return {
+            status: 503,
+            body: JSON.stringify({ error: { code: 'upstream_unavailable' } }),
+          };
+        }
+        // mode === 'incomplete_cap': exceeds MAX_FORWARD_PAGES (5) with hasMore: true
+        const match = /cursor=([^&]+)/.exec(url);
+        const cur = match ? decodeURIComponent(match[1]) : 'p1';
+        const nextNum =
+          cur === 'p1' ? 2 : Number.parseInt(cur.replace('cap-', ''), 10) + 1;
+        return {
+          status: 200,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-s1-stale',
+            available: true,
+            source: 'transcript',
+            cursor: `cap-${nextNum}`,
+            hasMore: true,
+            items: [
+              {
+                id: `inc-${nextNum}`,
+                role: 'agent',
+                source: 'transcript',
+                text: `INCOMPLETE_PART_${nextNum}`,
+              },
+            ],
+          }),
+        };
+      },
+    });
+
+    const { renderer, cache } = await renderUnlockedChatScreen({
+      sessionId: 'sess-s1-stale',
+      request,
+      pollIntervalMs: 5000,
+    });
+
+    try {
+      expect(getAllText(renderer)).toContain('CACHED_COMPLETE_REPLY');
+
+      // Continuation page HTTP 503 -> retains prior cache and marks stale
+      mode = 'fail_page2';
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(5000);
+        await flushAsync(14);
+      });
+      const failText = getAllText(renderer);
+      expect(failText).toContain('Stale data · Not live');
+      expect(failText).toContain('CACHED_COMPLETE_REPLY');
+      expect(failText).not.toContain('PARTIAL_FAIL_PAGE_1');
+
+      // Incomplete >5 page drain -> retains prior complete cache marked stale without mixing
+      mode = 'incomplete_cap';
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(5000);
+        await flushAsync(18);
+      });
+      const incText = getAllText(renderer);
+      expect(incText).toContain('Stale data · Not live');
+      expect(incText).toContain('CACHED_COMPLETE_REPLY');
+      expect(incText).not.toContain('INCOMPLETE_PART_2');
+    } finally {
+      jest.useRealTimers();
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('(FIXTURE) J72-4: short <256-byte transcript replaced by longer transcript shows only the new content as Live', async () => {
+    jest.useFakeTimers();
+    let replaced = false;
+
+    const request = makeChatTransport({
+      session: makeSessionFixture({ id: 'sess-j72-4' }),
+      historyHandler: () => ({
+        status: 200,
+        body: JSON.stringify(
+          replaced
+            ? {
+                apiVersion: 'v1',
+                sessionId: 'sess-j72-4',
+                available: true,
+                source: 'transcript',
+                cursor: 'offset:310:file:rollout.jsonl:head:256-9e8d7c6b',
+                hasMore: false,
+                items: [
+                  {
+                    id: 'new-u1',
+                    role: 'user',
+                    source: 'transcript',
+                    text: 'Brand new longer transcript prompt',
+                  },
+                  {
+                    id: 'new-a1',
+                    role: 'agent',
+                    source: 'transcript',
+                    text: 'Brand new longer transcript reply',
+                  },
+                ],
+              }
+            : {
+                apiVersion: 'v1',
+                sessionId: 'sess-j72-4',
+                available: true,
+                source: 'transcript',
+                cursor: 'offset:120:file:rollout.jsonl:head:120-0a1b2c3d',
+                hasMore: false,
+                items: [
+                  {
+                    id: 'old-u1',
+                    role: 'user',
+                    source: 'transcript',
+                    text: 'Stale short transcript message',
+                  },
+                ],
+              },
+        ),
+      }),
+    });
+
+    const { renderer, cache } = await renderUnlockedChatScreen({
+      sessionId: 'sess-j72-4',
+      request,
+      pollIntervalMs: 5000,
+    });
+
+    try {
+      expect(getAllText(renderer)).toContain('Stale short transcript message');
+
+      replaced = true;
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(5000);
+        await flushAsync(14);
+      });
+
+      const liveText = getAllText(renderer);
+      expect(liveText).not.toContain('Stale short transcript message');
+      expect(liveText).toContain('Brand new longer transcript prompt');
+      expect(liveText).toContain('Brand new longer transcript reply');
+      expect(liveText).not.toContain('Stale data · Not live');
+    } finally {
+      jest.useRealTimers();
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('(FIXTURE) S1 drains multi-page screen snapshot within one cycle and atomically replaces it on next poll', async () => {
+    jest.useFakeTimers();
+    let generation = 1;
+
+    const request = makeChatTransport({
+      session: makeSessionFixture({
+        id: 'sess-screen-drain',
+        harness: { id: 'shell', name: 'Shell', command: 'zsh' },
+        status: 'idle',
+      }),
+      historyHandler: url => {
+        const match = /[?&]cursor=([^&]+)/.exec(url);
+        const cursor = match ? decodeURIComponent(match[1]) : null;
+        if (generation === 1) {
+          if (!cursor) {
+            return {
+              status: 200,
+              body: JSON.stringify({
+                apiVersion: 'v1',
+                sessionId: 'sess-screen-drain',
+                available: true,
+                source: 'screen',
+                cursor: 'line:5:fp:snap1',
+                hasMore: true,
+                items: [
+                  {
+                    id: 's1-p1',
+                    role: 'agent',
+                    source: 'screen',
+                    text: 'SNAP1_PAGE_1',
+                  },
+                ],
+              }),
+            };
+          }
+          if (cursor === 'line:5:fp:snap1') {
+            return {
+              status: 200,
+              body: JSON.stringify({
+                apiVersion: 'v1',
+                sessionId: 'sess-screen-drain',
+                available: true,
+                source: 'screen',
+                cursor: 'line:10:fp:snap1',
+                hasMore: true,
+                items: [
+                  {
+                    id: 's1-p2',
+                    role: 'agent',
+                    source: 'screen',
+                    text: 'SNAP1_PAGE_2',
+                  },
+                ],
+              }),
+            };
+          }
+          return {
+            status: 200,
+            body: JSON.stringify({
+              apiVersion: 'v1',
+              sessionId: 'sess-screen-drain',
+              available: true,
+              source: 'screen',
+              cursor: 'line:15:fp:snap1',
+              hasMore: false,
+              items: [
+                {
+                  id: 's1-p3',
+                  role: 'agent',
+                  source: 'screen',
+                  text: 'SNAP1_PAGE_3',
+                },
+              ],
+            }),
+          };
+        }
+        // Poll 2 replaces snapshot atomically from fresh limit=20 request
+        if (!cursor) {
+          return {
+            status: 200,
+            body: JSON.stringify({
+              apiVersion: 'v1',
+              sessionId: 'sess-screen-drain',
+              available: true,
+              source: 'screen',
+              cursor: 'line:5:fp:snap2',
+              hasMore: true,
+              items: [
+                {
+                  id: 's2-p1',
+                  role: 'agent',
+                  source: 'screen',
+                  text: 'SNAP2_PAGE_1',
+                },
+              ],
+            }),
+          };
+        }
+        return {
+          status: 200,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-screen-drain',
+            available: true,
+            source: 'screen',
+            cursor: 'line:10:fp:snap2',
+            hasMore: false,
+            items: [
+              {
+                id: 's2-p2',
+                role: 'agent',
+                source: 'screen',
+                text: 'SNAP2_PAGE_2',
+              },
+            ],
+          }),
+        };
+      },
+    });
+
+    const { renderer, cache } = await renderUnlockedChatScreen({
+      sessionId: 'sess-screen-drain',
+      request,
+      pollIntervalMs: 5000,
+    });
+
+    try {
+      const cycle1 = getAllText(renderer);
+      expect(cycle1).toContain('SNAP1_PAGE_1');
+      expect(cycle1).toContain('SNAP1_PAGE_2');
+      expect(cycle1).toContain('SNAP1_PAGE_3');
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-window-text' }).props
+          .children,
+      ).toBe('Screen snapshot (current snapshot loaded)');
+
+      generation = 2;
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(5000);
+        await flushAsync(16);
+      });
+      const cycle2 = getAllText(renderer);
+      expect(cycle2).not.toContain('SNAP1_PAGE_1');
+      expect(cycle2).not.toContain('SNAP1_PAGE_3');
+      expect(cycle2).toContain('SNAP2_PAGE_1');
+      expect(cycle2).toContain('SNAP2_PAGE_2');
+    } finally {
+      jest.useRealTimers();
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('(FIXTURE) P1: refocusing an older chat drops only obsolete generations and preserves current-generation unresolved submissions of other chats', async () => {
+    mockConfiguredKeystore();
+
+    // Unit check on pruneObsoleteUnresolvedSubmissions
+    const unitScope = {};
+    saveUnresolvedSubmission(unitScope, {
+      sessionId: 'sess-a',
+      serverUrl: TEST_URL,
+      credentialGeneration: 0,
+      submission: {
+        status: 'unknown',
+        clientRequestId: 'mob-obsolete-0',
+        submittedText: 'Old gen prompt',
+        message: 'Unknown',
+      },
+    });
+    saveUnresolvedSubmission(unitScope, {
+      sessionId: 'sess-b',
+      serverUrl: TEST_URL,
+      credentialGeneration: 1,
+      submission: {
+        status: 'unknown',
+        clientRequestId: 'mob-active-1',
+        submittedText: 'Active gen prompt',
+        message: 'Unknown',
+      },
+    });
+    pruneObsoleteUnresolvedSubmissions(unitScope, {
+      credentialGeneration: 1,
+      serverUrl: TEST_URL,
+    });
+    expect(
+      getUnresolvedSubmission(unitScope, {
+        sessionId: 'sess-a',
+        serverUrl: TEST_URL,
+        credentialGeneration: 0,
+      }),
+    ).toBeNull();
+    expect(
+      getUnresolvedSubmission(unitScope, {
+        sessionId: 'sess-b',
+        serverUrl: TEST_URL,
+        credentialGeneration: 1,
+      })?.submission.clientRequestId,
+    ).toBe('mob-active-1');
+
+    // Full multi-chat focus check across credential generation bump
+    const sentToB: string[] = [];
+    let failB = true;
+    let idCounter = 1;
+    const fakeNow = () => 1_760_100_000_000 + idCounter++ * 1000;
+
+    const request = makeChatTransport({
+      detailHandler: url => {
+        const sid = url.includes('sess-p1-b') ? 'sess-p1-b' : 'sess-p1-a';
+        return {
+          status: 200,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            session: makeSessionFixture({
+              id: sid,
+              name: sid === 'sess-p1-b' ? 'Chat B' : 'Chat A',
+              status: 'idle',
+            }),
+          }),
+        };
+      },
+      historyHandler: url => {
+        const sid = url.includes('sess-p1-b') ? 'sess-p1-b' : 'sess-p1-a';
+        return {
+          status: 200,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: sid,
+            available: true,
+            source: 'transcript',
+            items: [],
+            hasMore: false,
+            cursor: 'c-p1',
+          }),
+        };
+      },
+      outputHandler: url => {
+        const sid = url.includes('sess-p1-b') ? 'sess-p1-b' : 'sess-p1-a';
+        return {
+          status: 200,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: sid,
+            available: true,
+            status: 'live',
+            output: '',
+          }),
+        };
+      },
+      messageHandler: async req => {
+        const parsed = JSON.parse(String(req.body ?? '{}')) as {
+          clientRequestId: string;
+        };
+        sentToB.push(parsed.clientRequestId);
+        if (failB) {
+          throw new Error('Request timed out');
+        }
+        return {
+          status: 202,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-p1-b',
+            delivered: true,
+            deliveryMethod: 'submit',
+            replayed: true,
+            status: 'delivered',
+          } satisfies SendMessageResponse),
+        };
+      },
+    });
+
+    const apiClient = new SpawneaApiClient({
+      transport: { request: request as never },
+      allowDebugLoopback: true,
+      now: fakeNow,
+    });
+    const cache = new SessionCredentialCache();
+    await cache.unlockAndGetCredentials({
+      apiClient,
+      allowDebugLoopback: true,
+    });
+
+    const createNav = (initiallyFocused: boolean) => {
+      let focused = initiallyFocused;
+      const listeners = new Map<string, Set<() => void>>();
+      return {
+        isFocused: () => focused,
+        addListener: (event: string, cb: () => void) => {
+          const set = listeners.get(event) ?? new Set();
+          set.add(cb);
+          listeners.set(event, set);
+          return () => set.delete(cb);
+        },
+        emit: (event: string) => {
+          if (event === 'focus') {
+            focused = true;
+          } else if (event === 'blur') {
+            focused = false;
+          }
+          for (const cb of listeners.get(event) ?? []) {
+            cb();
+          }
+        },
+      };
+    };
+
+    const navA = createNav(true);
+    const navB = createNav(true);
+    let rA!: ReactTestRenderer.ReactTestRenderer;
+    let rB!: ReactTestRenderer.ReactTestRenderer;
+
+    // 1. Open Chat A in generation 0, then blur Chat A
+    await ReactTestRenderer.act(async () => {
+      rA = ReactTestRenderer.create(
+        <SessionChatScreen
+          route={{ params: { sessionId: 'sess-p1-a' } }}
+          navigation={navA}
+          credentialCache={cache}
+          apiClient={apiClient}
+          allowDebugLoopback={true}
+          pollIntervalMs={60_000}
+          now={fakeNow}
+        />,
+      );
+      await flushAsync(10);
+    });
+
+    try {
+      await ReactTestRenderer.act(async () => {
+        navA.emit('blur');
+        await flushAsync(4);
+      });
+
+      // 2. Advance credential generation (generation 1) centrally and unlock
+      await ReactTestRenderer.act(async () => {
+        apiClient.notifyCredentialsChanged();
+        cache.invalidateForCredentialChange();
+        await cache.unlockAndGetCredentials({
+          apiClient,
+          allowDebugLoopback: true,
+        });
+        await flushAsync(4);
+      });
+
+      // 3. Open Chat B in generation 1 and create an unresolved unknown submission
+      await ReactTestRenderer.act(async () => {
+        rB = ReactTestRenderer.create(
+          <SessionChatScreen
+            route={{ params: { sessionId: 'sess-p1-b' } }}
+            navigation={navB}
+            credentialCache={cache}
+            apiClient={apiClient}
+            allowDebugLoopback={true}
+            pollIntervalMs={60_000}
+            now={fakeNow}
+          />,
+        );
+        await flushAsync(10);
+      });
+
+      await ReactTestRenderer.act(async () => {
+        rB.root
+          .findByProps({ testID: 'session-chat-input' })
+          .props.onChangeText('Chat B critical prompt');
+        await flushAsync(4);
+      });
+      await ReactTestRenderer.act(async () => {
+        rB.root
+          .findByProps({ testID: 'session-chat-send-button' })
+          .props.onPress();
+        await flushAsync(12);
+      });
+      expect(sentToB).toHaveLength(1);
+      expect(getAllText(rB)).toContain('Delivery unknown');
+
+      // 4. Refocus older Chat A (lastGenerationRef was 0 !== generation 1):
+      //    must NOT wipe Chat B's generation-1 unresolved record!
+      await ReactTestRenderer.act(async () => {
+        navB.emit('blur');
+        navA.emit('focus');
+        await flushAsync(10);
+      });
+
+      expect(
+        getUnresolvedSubmission(cache, {
+          sessionId: 'sess-p1-b',
+          serverUrl: TEST_URL,
+          credentialGeneration: 1,
+        })?.submission.clientRequestId,
+      ).toBe(sentToB[0]);
+
+      // 5. Return to Chat B -> Retry still reuses exact same clientRequestId
+      failB = false;
+      await ReactTestRenderer.act(async () => {
+        navA.emit('blur');
+        navB.emit('focus');
+        await flushAsync(10);
+      });
+      expect(getAllText(rB)).toContain('Delivery unknown');
+      await ReactTestRenderer.act(async () => {
+        rB.root
+          .findByProps({ testID: 'session-chat-retry-send-button' })
+          .props.onPress();
+        await flushAsync(12);
+      });
+      expect(sentToB).toHaveLength(2);
+      expect(sentToB[1]).toBe(sentToB[0]);
+      expect(getAllText(rB)).toContain('Delivered (replayed)');
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        rB?.unmount();
+        rA.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('(FIXTURE) J72-5: intra-cycle transcript continuation rejects cursor resets (file switch, head change, non-increasing offset) and keeps cache stale until next fresh cycle', async () => {
+    jest.useFakeTimers();
+    let cycle:
+      | 'initial'
+      | 'file_switch_mid_cycle'
+      | 'head_change_mid_cycle'
+      | 'offset_not_increasing'
+      | 'clean_fresh' = 'initial';
+
+    const request = makeChatTransport({
+      session: makeSessionFixture({ id: 'sess-j72-5' }),
+      historyHandler: url => {
+        if (cycle === 'initial') {
+          return {
+            status: 200,
+            body: JSON.stringify({
+              apiVersion: 'v1',
+              sessionId: 'sess-j72-5',
+              available: true,
+              source: 'transcript',
+              cursor: 'offset:120:file:rollout-1.jsonl:head:256-aaaa1111',
+              hasMore: false,
+              items: [
+                {
+                  id: 'init-1',
+                  role: 'agent',
+                  source: 'transcript',
+                  text: 'CACHED_INITIAL_TURN',
+                },
+              ],
+            }),
+          };
+        }
+        if (cycle === 'clean_fresh') {
+          return {
+            status: 200,
+            body: JSON.stringify({
+              apiVersion: 'v1',
+              sessionId: 'sess-j72-5',
+              available: true,
+              source: 'transcript',
+              cursor: 'offset:90:file:rollout-2.jsonl:head:256-bbbb2222',
+              hasMore: false,
+              items: [
+                {
+                  id: 'fresh-final-1',
+                  role: 'agent',
+                  source: 'transcript',
+                  text: 'NEW_FILE_FINAL_TURN',
+                },
+              ],
+            }),
+          };
+        }
+        if (!url.includes('cursor=')) {
+          return {
+            status: 200,
+            body: JSON.stringify({
+              apiVersion: 'v1',
+              sessionId: 'sess-j72-5',
+              available: true,
+              source: 'transcript',
+              cursor: 'offset:100:file:rollout-1.jsonl:head:256-aaaa1111',
+              hasMore: true,
+              items: [
+                {
+                  id: 'mix-p1',
+                  role: 'user',
+                  source: 'transcript',
+                  text: 'MIX_GUARD_PAGE_1',
+                },
+              ],
+            }),
+          };
+        }
+        const resetCursor =
+          cycle === 'file_switch_mid_cycle'
+            ? 'offset:40:file:rollout-2.jsonl:head:256-bbbb2222'
+            : cycle === 'head_change_mid_cycle'
+              ? 'offset:200:file:rollout-1.jsonl:head:256-cccc3333'
+              : 'offset:100:file:rollout-1.jsonl:head:256-aaaa1111';
+        return {
+          status: 200,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-j72-5',
+            available: true,
+            source: 'transcript',
+            cursor: resetCursor,
+            hasMore: false,
+            items: [
+              {
+                id: 'mix-p2-reset',
+                role: 'agent',
+                source: 'transcript',
+                text: 'RESET_FILE_PAGE_2',
+              },
+            ],
+          }),
+        };
+      },
+    });
+
+    const { renderer, cache } = await renderUnlockedChatScreen({
+      sessionId: 'sess-j72-5',
+      request,
+      pollIntervalMs: 5000,
+    });
+
+    try {
+      expect(getAllText(renderer)).toContain('CACHED_INITIAL_TURN');
+
+      for (const badCycle of [
+        'file_switch_mid_cycle',
+        'head_change_mid_cycle',
+        'offset_not_increasing',
+      ] as const) {
+        cycle = badCycle;
+        await ReactTestRenderer.act(async () => {
+          jest.advanceTimersByTime(5000);
+          await flushAsync(14);
+        });
+        const text = getAllText(renderer);
+        expect(text).toContain('Stale data · Not live');
+        expect(text).toContain('CACHED_INITIAL_TURN');
+        expect(text).not.toContain('MIX_GUARD_PAGE_1');
+        expect(text).not.toContain('RESET_FILE_PAGE_2');
+      }
+
+      // Next cycle starts fresh without cursor and replaces cache cleanly under Live
+      cycle = 'clean_fresh';
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(5000);
+        await flushAsync(14);
+      });
+      const recovered = getAllText(renderer);
+      expect(recovered).not.toContain('Stale data · Not live');
+      expect(recovered).not.toContain('CACHED_INITIAL_TURN');
+      expect(recovered).not.toContain('MIX_GUARD_PAGE_1');
+      expect(recovered).not.toContain('RESET_FILE_PAGE_2');
+      expect(recovered).toContain('NEW_FILE_FINAL_TURN');
+    } finally {
+      jest.useRealTimers();
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('(FIXTURE) background + unlock before in-flight HTTP 503 updates restored pending UI to unknown on epoch mismatch', async () => {
+    const appStateSpy = setupAppStateSpy();
+    let resolveFirstSend!: (res: {
+      status: number;
+      retryAfter: string | null;
+      body: string;
+    }) => void;
+    const sentIds: string[] = [];
+
+    const request = makeChatTransport({
+      session: makeSessionFixture({
+        id: 'sess-bg-unlock-503',
+        name: 'BG Unlock 503',
+        status: 'idle',
+      }),
+      messageHandler: req => {
+        const parsed = req.body
+          ? (JSON.parse(req.body) as { clientRequestId: string })
+          : { clientRequestId: '' };
+        sentIds.push(parsed.clientRequestId);
+        if (sentIds.length === 1) {
+          return new Promise(resolve => {
+            resolveFirstSend = resolve;
+          });
+        }
+        return Promise.resolve({
+          status: 202,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-bg-unlock-503',
+            delivered: true,
+            deliveryMethod: 'submit',
+            replayed: true,
+            status: 'delivered',
+          } satisfies SendMessageResponse),
+        });
+      },
+    });
+
+    const { renderer, cache } = await renderUnlockedChatScreen({
+      sessionId: 'sess-bg-unlock-503',
+      request,
+    });
+
+    try {
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-input' })
+          .props.onChangeText('bg unlock 503 test');
+      });
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-send-button' })
+          .props.onPress();
+        await flushAsync(4);
+      });
+      expect(sentIds).toHaveLength(1);
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-submission-status' })
+          .props.children,
+      ).toBe('Sending...');
+
+      // Background clears UI and increments sessionEpochRef while POST is in flight.
+      await ReactTestRenderer.act(async () => {
+        appStateSpy.emit('background');
+        await flushAsync(6);
+      });
+      expect(getAllText(renderer)).not.toContain('bg unlock 503 test');
+
+      // Unlock before POST finishes: same screen restores pending under new epoch.
+      await ReactTestRenderer.act(async () => {
+        appStateSpy.emit('active');
+        await flushAsync(14);
+      });
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-submission-status' })
+          .props.children,
+      ).toBe('Sending...');
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-input' }).props.value,
+      ).toBe('bg unlock 503 test');
+
+      // Now HTTP 503 arrives under the epoch mismatch: must transition to unknown.
+      await ReactTestRenderer.act(async () => {
+        resolveFirstSend({
+          status: 503,
+          retryAfter: null,
+          body: JSON.stringify({ error: { code: 'upstream_unavailable' } }),
+        });
+        await flushAsync(10);
+      });
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-submission-status' })
+          .props.children,
+      ).toBe('Delivery unknown');
+      expect(getAllText(renderer)).not.toContain(
+        'Sending prompt to session...',
+      );
+
+      // Retry (same ID) stays usable with the original clientRequestId.
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-retry-send-button' })
+          .props.onPress();
+        await flushAsync(10);
+      });
+      expect(sentIds).toHaveLength(2);
+      expect(sentIds[1]).toBe(sentIds[0]);
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-submission-status' })
+          .props.children,
+      ).toBe('Delivered (replayed)');
+    } finally {
+      appStateSpy.restore();
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('(FIXTURE) background + unlock before in-flight 2xx delivered response clears restored pending UI and refreshes history', async () => {
+    const appStateSpy = setupAppStateSpy();
+    let resolveFirstSend!: (res: {
+      status: number;
+      retryAfter: string | null;
+      body: string;
+    }) => void;
+    let includeDeliveredEcho = false;
+
+    const request = makeChatTransport({
+      session: makeSessionFixture({
+        id: 'sess-bg-unlock-delivered',
+        name: 'BG Unlock Delivered',
+        status: 'idle',
+      }),
+      historyHandler: () => ({
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessionId: 'sess-bg-unlock-delivered',
+          available: true,
+          source: 'transcript',
+          items: [
+            {
+              id: 'item-initial',
+              role: 'agent',
+              source: 'transcript',
+              text: 'INITIAL_HISTORY_ITEM',
+            },
+            ...(includeDeliveredEcho
+              ? [
+                  {
+                    id: 'item-delivered',
+                    role: 'user' as const,
+                    source: 'transcript' as const,
+                    text: 'BG_UNLOCK_DELIVERED_ECHO',
+                  },
+                ]
+              : []),
+          ],
+          hasMore: false,
+          cursor: 'cursor-1',
+        } satisfies SessionHistoryResponse),
+      }),
+      messageHandler: () =>
+        new Promise(resolve => {
+          resolveFirstSend = resolve;
+        }),
+    });
+
+    const { renderer, cache } = await renderUnlockedChatScreen({
+      sessionId: 'sess-bg-unlock-delivered',
+      request,
+    });
+
+    try {
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-input' })
+          .props.onChangeText('deliver across bg unlock');
+      });
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-send-button' })
+          .props.onPress();
+        await flushAsync(4);
+      });
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-submission-status' })
+          .props.children,
+      ).toBe('Sending...');
+
+      await ReactTestRenderer.act(async () => {
+        appStateSpy.emit('background');
+        await flushAsync(6);
+      });
+      expect(getAllText(renderer)).not.toContain('deliver across bg unlock');
+
+      await ReactTestRenderer.act(async () => {
+        appStateSpy.emit('active');
+        await flushAsync(14);
+      });
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-submission-status' })
+          .props.children,
+      ).toBe('Sending...');
+
+      // 2xx delivered settles under epoch mismatch: store is cleared, UI must
+      // clear pending state, reset draft, and trigger post-send refresh.
+      includeDeliveredEcho = true;
+      await ReactTestRenderer.act(async () => {
+        resolveFirstSend({
+          status: 202,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-bg-unlock-delivered',
+            delivered: true,
+            deliveryMethod: 'submit',
+            replayed: false,
+            status: 'delivered',
+          } satisfies SendMessageResponse),
+        });
+        await flushAsync(14);
+      });
+      expect(
+        renderer.root.findByProps({
+          testID: 'session-chat-submission-status',
+        }).props.children,
+      ).toBe('Delivered');
+      expect(getAllText(renderer)).not.toContain(
+        'Sending prompt to session...',
+      );
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-input' }).props.value,
+      ).toBe('');
+      expect(getAllText(renderer)).toContain('BG_UNLOCK_DELIVERED_ECHO');
+    } finally {
+      appStateSpy.restore();
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test.each([
+    {
+      label: 'HTTP 422 needs_human',
+      status: 422,
+      code: 'needs_human',
+      expectedMessage:
+        'Rejected (HTTP 422): session is not ready or unavailable for prompt delivery.',
+    },
+    {
+      label: 'HTTP 409 open_turn_conflict',
+      status: 409,
+      code: 'open_turn_conflict',
+      expectedMessage:
+        'Conflict (HTTP 409): this session already has an open turn. Wait until it finishes or needs input, then retry.',
+    },
+  ])(
+    '(FIXTURE) J72-6: background + unlock before in-flight $label shows Delivery failed and keeps draft text',
+    async ({ status, code, expectedMessage }) => {
+      const appStateSpy = setupAppStateSpy();
+      let resolveInFlight!: (res: {
+        status: number;
+        retryAfter: string | null;
+        body: string;
+      }) => void;
+      const draftPrompt = `keep draft across bg unlock ${status}`;
+
+      const request = makeChatTransport({
+        session: makeSessionFixture({
+          id: `sess-j72-6-${status}`,
+          name: `J72-6 ${status}`,
+          status: 'idle',
+        }),
+        messageHandler: () =>
+          new Promise(resolve => {
+            resolveInFlight = resolve;
+          }),
+      });
+
+      const { renderer, cache } = await renderUnlockedChatScreen({
+        sessionId: `sess-j72-6-${status}`,
+        request,
+      });
+
+      try {
+        await ReactTestRenderer.act(async () => {
+          renderer.root
+            .findByProps({ testID: 'session-chat-input' })
+            .props.onChangeText(draftPrompt);
+        });
+        await ReactTestRenderer.act(async () => {
+          renderer.root
+            .findByProps({ testID: 'session-chat-send-button' })
+            .props.onPress();
+          await flushAsync(4);
+        });
+        expect(
+          renderer.root.findByProps({ testID: 'session-chat-submission-status' })
+            .props.children,
+        ).toBe('Sending...');
+
+        await ReactTestRenderer.act(async () => {
+          appStateSpy.emit('background');
+          await flushAsync(6);
+        });
+        expect(getAllText(renderer)).not.toContain(draftPrompt);
+
+        await ReactTestRenderer.act(async () => {
+          appStateSpy.emit('active');
+          await flushAsync(14);
+        });
+        expect(
+          renderer.root.findByProps({ testID: 'session-chat-submission-status' })
+            .props.children,
+        ).toBe('Sending...');
+
+        // Definitive rejection settles under epoch mismatch: store is cleared,
+        // so originating screen must still render Delivery failed + keep draft.
+        await ReactTestRenderer.act(async () => {
+          resolveInFlight({
+            status,
+            retryAfter: null,
+            body: JSON.stringify({ error: { code } }),
+          });
+          await flushAsync(10);
+        });
+        expect(
+          renderer.root.findByProps({ testID: 'session-chat-submission-status' })
+            .props.children,
+        ).toBe('Delivery failed');
+        expect(getAllText(renderer)).toContain(expectedMessage);
+        expect(
+          renderer.root.findByProps({ testID: 'session-chat-input' }).props
+            .value,
+        ).toBe(draftPrompt);
+      } finally {
+        appStateSpy.restore();
+        await ReactTestRenderer.act(async () => {
+          renderer.unmount();
+        });
+        cache.dispose();
+      }
+    },
+  );
+
+  test('(FIXTURE) B1: intra-cycle transcript continuation accepts advancing :block: at same offset with matching file/head while rejecting block regressions', async () => {
+    jest.useFakeTimers();
+
+    type B1CycleMode =
+      | 'initial'
+      | 'block_advance'
+      | 'block_stalled'
+      | 'block_regression'
+      | 'file_switch'
+      | 'head_change'
+      | 'clean_fresh';
+    let cycle: B1CycleMode = 'initial';
+
+    const request = makeChatTransport({
+      session: makeSessionFixture({
+        id: 'sess-b1-block',
+        name: 'B1 Block Cursor',
+        status: 'idle',
+      }),
+      historyHandler: url => {
+        if (!url.includes('cursor=')) {
+          if (cycle === 'initial') {
+            return {
+              status: 200,
+              retryAfter: null,
+              body: JSON.stringify({
+                apiVersion: 'v1',
+                sessionId: 'sess-b1-block',
+                available: true,
+                source: 'transcript',
+                hasMore: false,
+                cursor: 'offset:10:file:claude-a.jsonl:head:h1',
+                items: [
+                  {
+                    id: 'c-init',
+                    role: 'agent',
+                    source: 'transcript',
+                    text: 'B1_CACHED_INITIAL',
+                  },
+                ],
+              }),
+            };
+          }
+          if (cycle === 'clean_fresh') {
+            return {
+              status: 200,
+              retryAfter: null,
+              body: JSON.stringify({
+                apiVersion: 'v1',
+                sessionId: 'sess-b1-block',
+                available: true,
+                source: 'transcript',
+                hasMore: false,
+                cursor: 'offset:80:file:claude-a.jsonl:head:h2',
+                items: [
+                  {
+                    id: 'c-fresh',
+                    role: 'agent',
+                    source: 'transcript',
+                    text: 'B1_FRESH_RECOVERED',
+                  },
+                ],
+              }),
+            };
+          }
+          return {
+            status: 200,
+            retryAfter: null,
+            body: JSON.stringify({
+              apiVersion: 'v1',
+              sessionId: 'sess-b1-block',
+              available: true,
+              source: 'transcript',
+              hasMore: true,
+              cursor: 'offset:56:file:claude-a.jsonl:head:h1:block:8',
+              items: [
+                {
+                  id: 'c-p1',
+                  role: 'agent',
+                  source: 'transcript',
+                  text: 'B1_PAGE_1_BLOCK_8',
+                },
+              ],
+            }),
+          };
+        }
+
+        const nextCursorByMode: Record<
+          Exclude<B1CycleMode, 'initial' | 'clean_fresh'>,
+          string
+        > = {
+          block_advance: 'offset:56:file:claude-a.jsonl:head:h1:block:16',
+          block_stalled: 'offset:56:file:claude-a.jsonl:head:h1:block:8',
+          block_regression: 'offset:56:file:claude-a.jsonl:head:h1:block:4',
+          file_switch: 'offset:56:file:claude-b.jsonl:head:h1:block:16',
+          head_change: 'offset:56:file:claude-a.jsonl:head:h9:block:16',
+        };
+        const mode = cycle as Exclude<B1CycleMode, 'initial' | 'clean_fresh'>;
+        return {
+          status: 200,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-b1-block',
+            available: true,
+            source: 'transcript',
+            hasMore: false,
+            cursor: nextCursorByMode[mode],
+            items: [
+              {
+                id: `c-p2-${mode}`,
+                role: 'agent',
+                source: 'transcript',
+                text: `B1_PAGE_2_${mode.toUpperCase()}`,
+              },
+            ],
+          }),
+        };
+      },
+    });
+
+    const { renderer, cache } = await renderUnlockedChatScreen({
+      sessionId: 'sess-b1-block',
+      request,
+      pollIntervalMs: 5000,
+    });
+
+    try {
+      expect(getAllText(renderer)).toContain('B1_CACHED_INITIAL');
+
+      // Advancing :block: at identical offset with matching file/head merges cleanly under Live.
+      cycle = 'block_advance';
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(5000);
+        await flushAsync(14);
+      });
+      const advancedText = getAllText(renderer);
+      expect(advancedText).not.toContain('Stale data · Not live');
+      expect(advancedText).toContain('B1_PAGE_1_BLOCK_8');
+      expect(advancedText).toContain('B1_PAGE_2_BLOCK_ADVANCE');
+
+      // Regression / reset cases keep the last complete cache stale.
+      for (const badMode of [
+        'block_stalled',
+        'block_regression',
+        'file_switch',
+        'head_change',
+      ] as const) {
+        cycle = badMode;
+        await ReactTestRenderer.act(async () => {
+          jest.advanceTimersByTime(5000);
+          await flushAsync(14);
+        });
+        const staleText = getAllText(renderer);
+        expect(staleText).toContain('Stale data · Not live');
+        expect(staleText).toContain('B1_PAGE_2_BLOCK_ADVANCE');
+        expect(staleText).not.toContain(`B1_PAGE_2_${badMode.toUpperCase()}`);
+      }
+
+      // Next clean fresh cycle clears stale state.
+      cycle = 'clean_fresh';
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(5000);
+        await flushAsync(14);
+      });
+      const recovered = getAllText(renderer);
+      expect(recovered).not.toContain('Stale data · Not live');
+      expect(recovered).toContain('B1_FRESH_RECOVERED');
+    } finally {
+      jest.useRealTimers();
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
     }
   });
 });
