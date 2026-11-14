@@ -13,6 +13,7 @@ import {
   sortDashboardSessions,
 } from '../src/dashboard/dashboardModel';
 import { DashboardScreen } from '../src/screens/DashboardScreen';
+import { SessionChatScreen } from '../src/screens/SessionChatScreen';
 import { SettingsScreen } from '../src/screens/SettingsScreen';
 import {
   defaultSessionCredentialCache,
@@ -2446,4 +2447,179 @@ describe('DashboardScreen', () => {
       }
     },
   );
+});
+
+describe('SessionChatScreen S70-2 relock guard', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    defaultSessionCredentialCache.dispose();
+  });
+
+  test('S70-2 shows session ID only while unlocked in foreground and hides on background without biometrics or HTTP', async () => {
+    const appStateSpy = setupAppStateSpy();
+    mockConfiguredKeystore();
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      retryAfter: null,
+      body: JSON.stringify({
+        apiVersion: 'v1',
+        sessions: [
+          makeSessionFixture({
+            id: 'sess-chat-bg-1',
+            name: 'BG Session',
+            status: 'idle',
+          }),
+        ],
+      }),
+    });
+    (NativeModules as { SpawneaHttp?: unknown }).SpawneaHttp = {
+      getConstants: () => ({ allowDebugLoopback: false }),
+      request,
+    };
+
+    let renderer!: ReactTestRenderer.ReactTestRenderer;
+    try {
+      await ReactTestRenderer.act(async () => {
+        renderer = ReactTestRenderer.create(<App />);
+        await flushAsync(8);
+      });
+
+      const sessionCard = renderer.root.findByProps({
+        testID: 'dashboard-session-card-sess-chat-bg-1',
+      });
+      await ReactTestRenderer.act(async () => {
+        sessionCard.props.onPress();
+        await flushAsync(8);
+      });
+
+      expect(getAllText(renderer)).toContain('sess-chat-bg-1');
+      expect(keystore.readKey).toHaveBeenCalledTimes(1);
+      expect(request).toHaveBeenCalledTimes(1);
+
+      await ReactTestRenderer.act(async () => {
+        appStateSpy.emit('background');
+        await flushAsync(4);
+      });
+
+      expect(getAllText(renderer)).not.toContain('sess-chat-bg-1');
+      expect(getAllText(renderer)).toContain(
+        'Locked. Unlock from Dashboard to view this session.',
+      );
+
+      // Returning directly to foreground on Session/Chat must keep ID hidden
+      // and never trigger its own biometric prompt or HTTP call.
+      await ReactTestRenderer.act(async () => {
+        appStateSpy.emit('active');
+        await flushAsync(6);
+      });
+
+      expect(getAllText(renderer)).not.toContain('sess-chat-bg-1');
+      expect(getAllText(renderer)).toContain(
+        'Locked. Unlock from Dashboard to view this session.',
+      );
+      expect(keystore.readKey).toHaveBeenCalledTimes(1);
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally {
+      delete (NativeModules as { SpawneaHttp?: unknown }).SpawneaHttp;
+      if (renderer) {
+        await ReactTestRenderer.act(async () => {
+          renderer.unmount();
+        });
+      }
+      appStateSpy.restore();
+    }
+  });
+
+  test('S70-2 clears session ID on cache.clear(), invokes navigation.setParams, restores only when unlocked with param intact, and cleans up listeners', async () => {
+    const appStateSpy = setupAppStateSpy();
+    mockConfiguredKeystore();
+    const apiClient = new SpawneaApiClient({
+      transport: {
+        request: jest.fn(),
+      },
+      allowDebugLoopback: true,
+    });
+    const cache = new SessionCredentialCache();
+    await cache.unlockAndGetCredentials({
+      apiClient,
+      allowDebugLoopback: true,
+    });
+    expect(cache.hasUnlockedKey(apiClient)).toBe(true);
+
+    const setParams = jest.fn();
+    const unsubscribeFocus = jest.fn();
+    let focusHandler: (() => void) | undefined;
+    const addListener = jest.fn((event: string, listener: () => void) => {
+      if (event === 'focus') {
+        focusHandler = listener;
+      }
+      return unsubscribeFocus;
+    });
+
+    const addEventListenerMock = AppState.addEventListener as unknown as jest.Mock;
+    const subCountBeforeRender = addEventListenerMock.mock.results.length;
+
+    let renderer!: ReactTestRenderer.ReactTestRenderer;
+    try {
+      await ReactTestRenderer.act(async () => {
+        renderer = ReactTestRenderer.create(
+          <SessionChatScreen
+            route={{ params: { sessionId: 'sess-chat-clear-2' } }}
+            navigation={{ setParams, addListener }}
+            credentialCache={cache}
+            apiClient={apiClient}
+          />,
+        );
+        await flushAsync();
+      });
+
+      expect(getAllText(renderer)).toContain('sess-chat-clear-2');
+
+      await ReactTestRenderer.act(async () => {
+        cache.clear();
+        await flushAsync();
+      });
+
+      expect(setParams).toHaveBeenCalledWith({ sessionId: undefined });
+      expect(getAllText(renderer)).not.toContain('sess-chat-clear-2');
+      expect(getAllText(renderer)).toContain(
+        'Locked. Unlock from Dashboard to view this session.',
+      );
+      expect(keystore.readKey).toHaveBeenCalledTimes(1);
+
+      // Re-unlocking while route param was not mutated externally allows display again on focus/active.
+      await cache.unlockAndGetCredentials({
+        apiClient,
+        allowDebugLoopback: true,
+      });
+      await ReactTestRenderer.act(async () => {
+        focusHandler?.();
+        await flushAsync();
+      });
+      expect(getAllText(renderer)).toContain('sess-chat-clear-2');
+
+      // Inactive also hides ID and clears route param.
+      await ReactTestRenderer.act(async () => {
+        appStateSpy.emit('inactive');
+        await flushAsync();
+      });
+      expect(getAllText(renderer)).not.toContain('sess-chat-clear-2');
+
+      const screenAppStateSubs = addEventListenerMock.mock.results
+        .slice(subCountBeforeRender)
+        .map(result => result.value as { remove: jest.Mock });
+      expect(screenAppStateSubs.length).toBeGreaterThanOrEqual(1);
+
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      expect(unsubscribeFocus).toHaveBeenCalledTimes(1);
+      for (const sub of screenAppStateSubs) {
+        expect(sub.remove).toHaveBeenCalledTimes(1);
+      }
+    } finally {
+      cache.dispose();
+      appStateSpy.restore();
+    }
+  });
 });
