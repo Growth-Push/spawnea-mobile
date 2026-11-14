@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic unit-test dummy key fixture in __tests__/keyStorage.test.ts"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^__tests__/keyStorage\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^dummy-secret-key-12345678901234567890$''']
