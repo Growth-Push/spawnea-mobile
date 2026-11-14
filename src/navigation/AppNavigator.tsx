@@ -1,7 +1,10 @@
 import React from 'react';
 import { StyleSheet, View } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { NavigationContainer } from '@react-navigation/native';
+import {
+  NavigationContainer,
+  type NavigatorScreenParams,
+} from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import { DashboardScreen } from '../screens/DashboardScreen';
@@ -9,15 +12,15 @@ import { SessionChatScreen } from '../screens/SessionChatScreen';
 import { SessionsScreen } from '../screens/SessionsScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 
-export type RootTabParamList = {
-  DashboardTab: undefined;
-  SessionsTab: undefined;
-  SettingsTab: undefined;
-};
-
 export type SessionsStackParamList = {
   SessionsList: undefined;
-  SessionChat: undefined;
+  SessionChat: { sessionId?: string } | undefined;
+};
+
+export type RootTabParamList = {
+  DashboardTab: undefined;
+  SessionsTab: NavigatorScreenParams<SessionsStackParamList> | undefined;
+  SettingsTab: undefined;
 };
 
 const Tab = createBottomTabNavigator<RootTabParamList>();
@@ -191,6 +194,13 @@ export function AppNavigator(): React.JSX.Element {
           options={{
             title: 'Dashboard',
             tabBarLabel: 'Dashboard',
+            headerShown: false,
+            tabBarStyle: {
+              backgroundColor: '#0d1117',
+              borderTopColor: '#21262d',
+            },
+            tabBarActiveTintColor: '#a78bfa',
+            tabBarInactiveTintColor: '#8b949e',
             tabBarIcon: renderDashboardTabIcon,
           }}>
           {({
@@ -200,6 +210,18 @@ export function AppNavigator(): React.JSX.Element {
           }) => (
             <DashboardScreen
               onOpenSettings={() => navigation.navigate('SettingsTab')}
+              onOpenSessions={() =>
+                navigation.navigate('SessionsTab', {
+                  screen: 'SessionsList',
+                })
+              }
+              onOpenSessionChat={sessionId =>
+                navigation.navigate('SessionsTab', {
+                  screen: 'SessionChat',
+                  params: { sessionId },
+                  initial: false,
+                })
+              }
             />
           )}
         </Tab.Screen>

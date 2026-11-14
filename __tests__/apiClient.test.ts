@@ -990,4 +990,110 @@ describe('SpawneaApiClient', () => {
     });
     expect(request).toHaveBeenCalledTimes(3);
   });
+
+  test('accepts optional worktree.branch, discards worktree.path, and rejects malformed worktree payloads', async () => {
+    const request = jest
+      .fn()
+      // 1. Mix of absent worktree, null worktree, null branch, and worktree with branch+path
+      .mockResolvedValueOnce({
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessions: [
+            makeSessionFixture({ id: 'sess-no-wt' }),
+            { ...makeSessionFixture({ id: 'sess-null-wt' }), worktree: null },
+            {
+              ...makeSessionFixture({ id: 'sess-null-branch' }),
+              worktree: { branch: null, path: '/private/host/path-1' },
+            },
+            {
+              ...makeSessionFixture({ id: 'sess-with-branch' }),
+              worktree: {
+                managed: true,
+                branch: 'feat/mobile-dashboard',
+                baseBranch: 'main',
+                path: '/private/host/worktree-secret',
+              },
+            },
+          ],
+        }),
+      })
+      // 2. Detail response with worktree.path also discards path
+      .mockResolvedValueOnce({
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          session: {
+            ...makeSessionFixture({ id: 'sess-detail-wt' }),
+            worktree: {
+              branch: 'fix/detail-branch',
+              path: '/private/host/detail-secret',
+            },
+          },
+        }),
+      })
+      // 3. Invalid worktree type (string)
+      .mockResolvedValueOnce({
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessions: [{ ...makeSessionFixture({ id: 'sess-bad-wt' }), worktree: 'bad' }],
+        }),
+      })
+      // 4. Invalid worktree.branch type (number)
+      .mockResolvedValueOnce({
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessions: [
+            {
+              ...makeSessionFixture({ id: 'sess-bad-branch' }),
+              worktree: { branch: 42 },
+            },
+          ],
+        }),
+      });
+
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: false,
+    });
+
+    const listRes = await client.listSessions(validConfig);
+    expect(listRes.ok).toBe(true);
+    if (listRes.ok) {
+      expect(listRes.data.sessions).toHaveLength(4);
+      expect(listRes.data.sessions[0].worktree).toBeUndefined();
+      expect(listRes.data.sessions[1].worktree).toBeNull();
+      expect(listRes.data.sessions[2].worktree).toEqual({ branch: null });
+      expect(listRes.data.sessions[3].worktree).toEqual({
+        branch: 'feat/mobile-dashboard',
+      });
+      const serialized = JSON.stringify(listRes.data);
+      expect(serialized).not.toContain('/private/host/path-1');
+      expect(serialized).not.toContain('/private/host/worktree-secret');
+    }
+
+    const detailRes = await client.getSessionDetail(validConfig, 'sess-detail-wt');
+    expect(detailRes.ok).toBe(true);
+    if (detailRes.ok) {
+      expect(detailRes.data.session.worktree).toEqual({
+        branch: 'fix/detail-branch',
+      });
+      expect(JSON.stringify(detailRes.data)).not.toContain('/private/host/detail-secret');
+    }
+
+    expect(await client.listSessions(validConfig)).toMatchObject({
+      ok: false,
+      category: 'malformed_response',
+    });
+    expect(await client.listSessions(validConfig)).toMatchObject({
+      ok: false,
+      category: 'malformed_response',
+    });
+  });
 });
