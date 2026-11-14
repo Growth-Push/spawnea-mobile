@@ -43,7 +43,7 @@ import {
 } from '../storage/sessionCredentialCache';
 
 export const DEFAULT_DASHBOARD_POLL_INTERVAL_MS = 10000;
-const STALE_AGE_TICK_MS = 1000;
+const SNAPSHOT_AGE_TICK_MS = 1000;
 
 export interface DashboardScreenProps {
   onOpenSettings: () => void;
@@ -167,6 +167,7 @@ export function DashboardScreen({
   const autoUnlockDeclinedRef = useRef(false);
   const requestSeqRef = useRef(0);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingCooldownTriggerRef = useRef<SyncTrigger | null>(null);
   const runSyncRef = useRef<(trigger: SyncTrigger) => Promise<void>>(
     async () => undefined,
   );
@@ -184,6 +185,7 @@ export function DashboardScreen({
         requestSeqRef.current += 1;
       }
       clearPollTimer();
+      pendingCooldownTriggerRef.current = null;
       setIsManualRefreshing(false);
       setIsBackgroundRefreshing(false);
       autoUnlockDeclinedRef.current = true;
@@ -234,14 +236,18 @@ export function DashboardScreen({
   );
 
   const schedulePoll = useCallback(
-    (delayMs: number) => {
+    (delayMs: number, trigger: SyncTrigger = 'poll') => {
       clearPollTimer();
       if (!mountedRef.current || !isFocusedRef.current || !appActiveRef.current) {
+        pendingCooldownTriggerRef.current = null;
         return;
       }
+      pendingCooldownTriggerRef.current = trigger === 'poll' ? null : trigger;
       pollTimerRef.current = setTimeout(() => {
         pollTimerRef.current = null;
-        runSyncRef.current('poll').catch(() => undefined);
+        const nextTrigger = pendingCooldownTriggerRef.current ?? 'poll';
+        pendingCooldownTriggerRef.current = null;
+        runSyncRef.current(nextTrigger).catch(() => undefined);
       }, Math.max(0, delayMs));
     },
     [clearPollTimer],
@@ -337,12 +343,14 @@ export function DashboardScreen({
         lastGenerationRef.current = generationAtStart;
         snapshotRef.current = null;
         autoUnlockDeclinedRef.current = false;
+        pendingCooldownTriggerRef.current = null;
       } else if (
         snapshotRef.current !== null &&
         snapshotRef.current.serverUrl !== normalizedUrl
       ) {
         snapshotRef.current = null;
         autoUnlockDeclinedRef.current = false;
+        pendingCooldownTriggerRef.current = null;
       }
 
       const terminalLock = credentialCache.getTerminalAuthLock();
@@ -352,6 +360,7 @@ export function DashboardScreen({
       }
 
       if (trigger !== 'manual' && apiClient.isPollingPausedForAuth()) {
+        pendingCooldownTriggerRef.current = null;
         const message = formatApiErrorMessage('polling_paused_auth', 401, null);
         const currentNowMs = now();
         setClockMs(currentNowMs);
@@ -408,9 +417,19 @@ export function DashboardScreen({
             },
           });
         }
-        schedulePoll(cooldownSeconds * 1000);
+        const resumeTrigger: SyncTrigger =
+          trigger === 'manual'
+            ? 'manual'
+            : trigger === 'poll'
+              ? (pendingCooldownTriggerRef.current ?? 'poll')
+              : pendingCooldownTriggerRef.current === 'manual'
+                ? 'manual'
+                : trigger;
+        schedulePoll(cooldownSeconds * 1000, resumeTrigger);
         return;
       }
+
+      pendingCooldownTriggerRef.current = null;
 
       let credentials = credentialCache.getCachedCredentials(
         apiClient,
@@ -637,6 +656,13 @@ export function DashboardScreen({
         }
       },
     );
+    const unsubscribeTerminalCleared = credentialCache.onTerminalLockCleared(
+      () => {
+        if (mountedRef.current) {
+          autoUnlockDeclinedRef.current = false;
+        }
+      },
+    );
 
     if (isFocusedRef.current && appActiveRef.current) {
       runSync('focus').catch(() => undefined);
@@ -647,6 +673,9 @@ export function DashboardScreen({
       setIsManualRefreshing(false);
       setIsBackgroundRefreshing(false);
       if (appActiveRef.current) {
+        if (snapshotRef.current !== null) {
+          setClockMs(now());
+        }
         runSync('focus').catch(() => undefined);
       }
     });
@@ -655,6 +684,7 @@ export function DashboardScreen({
       isFocusedRef.current = false;
       requestSeqRef.current += 1;
       clearPollTimer();
+      pendingCooldownTriggerRef.current = null;
       setIsManualRefreshing(false);
       setIsBackgroundRefreshing(false);
     });
@@ -668,6 +698,7 @@ export function DashboardScreen({
       if (!nextActive) {
         requestSeqRef.current += 1;
         clearPollTimer();
+        pendingCooldownTriggerRef.current = null;
         setIsManualRefreshing(false);
         setIsBackgroundRefreshing(false);
         credentialCache.clear();
@@ -699,6 +730,9 @@ export function DashboardScreen({
 
       if (!wasActive && nextActive && isFocusedRef.current) {
         autoUnlockDeclinedRef.current = false;
+        if (snapshotRef.current !== null) {
+          setClockMs(now());
+        }
         runSync('foreground').catch(() => undefined);
       }
     });
@@ -707,7 +741,9 @@ export function DashboardScreen({
       mountedRef.current = false;
       requestSeqRef.current += 1;
       clearPollTimer();
+      pendingCooldownTriggerRef.current = null;
       unsubscribeTerminalAuth();
+      unsubscribeTerminalCleared();
       unsubscribeFocus?.();
       unsubscribeBlur?.();
       appStateSub?.remove?.();
@@ -728,17 +764,19 @@ export function DashboardScreen({
       ? viewState.snapshot
       : null;
 
+  const hasActiveSnapshot = activeSnapshot !== null;
+
   useEffect(() => {
-    if (viewState.status !== 'stale') {
+    if (!hasActiveSnapshot) {
       return;
     }
     const timer = setInterval(() => {
       if (mountedRef.current && isFocusedRef.current && appActiveRef.current) {
         setClockMs(now());
       }
-    }, STALE_AGE_TICK_MS);
+    }, SNAPSHOT_AGE_TICK_MS);
     return () => clearInterval(timer);
-  }, [now, viewState.status]);
+  }, [hasActiveSnapshot, now]);
 
   const handleManualRefresh = useCallback(() => {
     runSync('manual').catch(() => undefined);

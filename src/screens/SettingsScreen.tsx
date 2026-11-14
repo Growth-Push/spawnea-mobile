@@ -393,6 +393,8 @@ export function SettingsScreen({
         return;
       }
 
+      credentialCache.recordReadSuccess();
+
       const response = await apiClient.testConnection({
         serverUrl: urlCheck.normalizedUrl,
         apiKey: unlockResult.data,

@@ -1643,4 +1643,320 @@ describe('DashboardScreen', () => {
       cache.dispose();
     }
   });
+
+  test.each([
+    ['empty', []],
+    ['live', [makeSessionFixture({ id: 'sess-age-1', status: 'working' })]],
+  ])(
+    'J70-5 advances relative age in %s state while focused and active even with a pending poll',
+    async (_label, sessions) => {
+      jest.setSystemTime(new Date('2026-11-14T12:00:00Z'));
+      mockConfiguredKeystore();
+      const request = jest
+        .fn()
+        .mockResolvedValueOnce({
+          status: 200,
+          retryAfter: null,
+          body: JSON.stringify({ apiVersion: 'v1', sessions }),
+        })
+        .mockImplementationOnce(() => new Promise(() => {}));
+
+      const client = new SpawneaApiClient({
+        transport: { request },
+        allowDebugLoopback: false,
+      });
+      const cache = new SessionCredentialCache(false);
+
+      let renderer!: ReactTestRenderer.ReactTestRenderer;
+      await ReactTestRenderer.act(async () => {
+        renderer = ReactTestRenderer.create(
+          <DashboardScreen
+            onOpenSettings={jest.fn()}
+            onOpenSessions={jest.fn()}
+            onOpenSessionChat={jest.fn()}
+            apiClient={client}
+            credentialCache={cache}
+            allowDebugLoopback={false}
+          />,
+        );
+        await flushAsync();
+      });
+
+      try {
+        const lastUpdatedText = () =>
+          renderer.root
+            .findByProps({ testID: 'dashboard-last-updated' })
+            .props.children.join('');
+
+        expect(
+          renderer.root.findByProps({ testID: 'dashboard-connection-status' })
+            .props.children,
+        ).toBe('Live');
+        expect(lastUpdatedText()).toContain('(0s ago)');
+
+        await ReactTestRenderer.act(async () => {
+          jest.advanceTimersByTime(10000);
+          await flushAsync();
+        });
+        expect(request).toHaveBeenCalledTimes(2);
+        expect(lastUpdatedText()).toContain('(10s ago)');
+
+        await ReactTestRenderer.act(async () => {
+          jest.advanceTimersByTime(10000);
+          await flushAsync();
+        });
+        expect(
+          renderer.root.findByProps({ testID: 'dashboard-connection-status' })
+            .props.children,
+        ).toBe('Live');
+        expect(lastUpdatedText()).toContain('(20s ago)');
+      } finally {
+        await ReactTestRenderer.act(async () => {
+          renderer.unmount();
+        });
+        cache.dispose();
+      }
+    },
+  );
+
+  test('N70-3 preserves foreground resume intent across 429 cooldown without violating cooldown or passive-poll rules', async () => {
+    const appState = setupAppStateSpy();
+    mockConfiguredKeystore();
+    let currentTimeMs = 1_700_000_000_000;
+    const now = () => currentTimeMs;
+
+    const request = jest
+      .fn()
+      .mockResolvedValueOnce({
+        status: 429,
+        retryAfter: '30',
+        body: '',
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessions: [makeSessionFixture({ id: 'sess-429-resume' })],
+        }),
+      });
+
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: false,
+      now,
+    });
+    const cache = new SessionCredentialCache(true);
+
+    let renderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      renderer = ReactTestRenderer.create(
+        <DashboardScreen
+          onOpenSettings={jest.fn()}
+          onOpenSessions={jest.fn()}
+          onOpenSessionChat={jest.fn()}
+          apiClient={client}
+          credentialCache={cache}
+          allowDebugLoopback={false}
+          pollIntervalMs={10000}
+          now={now}
+        />,
+      );
+      await flushAsync();
+    });
+
+    try {
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(keystore.readKey).toHaveBeenCalledTimes(1);
+      expect(
+        renderer.root.findByProps({ testID: 'dashboard-connection-status' })
+          .props.children,
+      ).toBe('Rate limited (HTTP 429)');
+
+      // Background clears the in-memory credential cache while 429 cooldown is active.
+      await ReactTestRenderer.act(async () => {
+        appState.emit('background');
+        await flushAsync();
+      });
+      expect(cache.getCachedCredentials(client)).toBeNull();
+
+      // Return to foreground 15s into the 30s Retry-After window: must respect cooldown
+      // (no HTTP call, no premature prompt) and preserve foreground unlock intent.
+      currentTimeMs += 15000;
+      await ReactTestRenderer.act(async () => {
+        appState.emit('active');
+        await flushAsync();
+      });
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(keystore.readKey).toHaveBeenCalledTimes(1);
+      expect(
+        renderer.root.findByProps({ testID: 'dashboard-connection-status' })
+          .props.children,
+      ).toBe('Rate limited (HTTP 429)');
+
+      // Advance remaining 15s until cooldown expires -> unlocks once and fetches live sessions.
+      currentTimeMs += 15000;
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(15000);
+        await flushAsync();
+      });
+      expect(keystore.readKey).toHaveBeenCalledTimes(2);
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(
+        renderer.root.findByProps({ testID: 'dashboard-connection-status' })
+          .props.children,
+      ).toBe('Live');
+      expect(getAllText(renderer)).toContain('sess-429-resume');
+
+      // Passive poll with cleared cache must never prompt for biometrics.
+      cache.clear();
+      currentTimeMs += 10000;
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(10000);
+        await flushAsync();
+      });
+      expect(keystore.readKey).toHaveBeenCalledTimes(2);
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(
+        renderer.root.findByProps({ testID: 'dashboard-connection-status' })
+          .props.children,
+      ).toBe('Stale · Locked');
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+      appState.restore();
+    }
+  });
+
+  test('N70-4 clears shared terminalAuthLock on successful Settings unlock without caching key and lets Dashboard recover on focus', async () => {
+    mockConfiguredKeystore();
+    const request = jest
+      .fn()
+      .mockResolvedValueOnce({
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessions: [makeSessionFixture({ id: 'sess-n70-4' })],
+        }),
+      })
+      .mockResolvedValue({
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessions: [makeSessionFixture({ id: 'sess-n70-4' })],
+        }),
+      });
+
+    const client = new SpawneaApiClient({
+      transport: { request },
+      allowDebugLoopback: false,
+    });
+    const cache = new SessionCredentialCache(false);
+
+    const listeners = new Map<'focus' | 'blur', Set<() => void>>();
+    let focused = true;
+    const dashNav = {
+      isFocused: () => focused,
+      addListener: jest.fn((event: 'focus' | 'blur', cb: () => void) => {
+        if (!listeners.has(event)) {
+          listeners.set(event, new Set());
+        }
+        listeners.get(event)?.add(cb);
+        return () => {
+          listeners.get(event)?.delete(cb);
+        };
+      }),
+    };
+    const emitDashNav = (event: 'focus' | 'blur') => {
+      focused = event === 'focus';
+      listeners.get(event)?.forEach(cb => cb());
+    };
+
+    let dashRenderer!: ReactTestRenderer.ReactTestRenderer;
+    let settingsRenderer!: ReactTestRenderer.ReactTestRenderer;
+    await ReactTestRenderer.act(async () => {
+      dashRenderer = ReactTestRenderer.create(
+        <NavigationContext.Provider value={dashNav as never}>
+          <DashboardScreen
+            onOpenSettings={jest.fn()}
+            onOpenSessions={jest.fn()}
+            onOpenSessionChat={jest.fn()}
+            apiClient={client}
+            credentialCache={cache}
+            allowDebugLoopback={false}
+          />
+        </NavigationContext.Provider>,
+      );
+      settingsRenderer = ReactTestRenderer.create(
+        <SettingsScreen
+          apiClient={client}
+          credentialCache={cache}
+          allowDebugLoopback={false}
+        />,
+      );
+      await flushAsync();
+    });
+
+    try {
+      expect(request).toHaveBeenCalledTimes(1);
+
+      // Navigate to Settings (blur Dashboard), trigger temporary biometric lockout in Settings.
+      await ReactTestRenderer.act(async () => {
+        emitDashNav('blur');
+        await flushAsync();
+      });
+      keystore.readKey.mockRejectedValueOnce({
+        code: 'E_BIOMETRIC_LOCKOUT',
+        message: 'Too many failed biometric attempts',
+      });
+      await ReactTestRenderer.act(async () => {
+        await settingsRenderer.root
+          .findByProps({ testID: 'test-connection-button' })
+          .props.onPress();
+        await flushAsync();
+      });
+      expect(cache.getTerminalAuthLock()?.reason).toBe('biometric_lockout');
+      expect(
+        dashRenderer.root.findByProps({ testID: 'dashboard-connection-status' })
+          .props.children,
+      ).toBe('Stale · Locked');
+
+      // Later, Settings -> Test connection succeeds -> clears terminalAuthLock without caching the key.
+      keystore.readKey.mockResolvedValueOnce(TEST_KEY);
+      await ReactTestRenderer.act(async () => {
+        await settingsRenderer.root
+          .findByProps({ testID: 'test-connection-button' })
+          .props.onPress();
+        await flushAsync();
+      });
+      expect(
+        settingsRenderer.root.findByProps({ testID: 'test-status-text' }).props
+          .children,
+      ).toContain('Connection succeeded (HTTP 200)');
+      expect(cache.getTerminalAuthLock()).toBeNull();
+      expect(cache.getCachedCredentials(client)).toBeNull();
+
+      // Returning focus to Dashboard unlocks once and resumes Live (not stuck on obsolete lockout).
+      keystore.readKey.mockResolvedValueOnce(TEST_KEY);
+      await ReactTestRenderer.act(async () => {
+        emitDashNav('focus');
+        await flushAsync();
+      });
+      expect(
+        dashRenderer.root.findByProps({ testID: 'dashboard-connection-status' })
+          .props.children,
+      ).toBe('Live');
+      expect(request).toHaveBeenCalledTimes(3);
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        dashRenderer.unmount();
+        settingsRenderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
 });

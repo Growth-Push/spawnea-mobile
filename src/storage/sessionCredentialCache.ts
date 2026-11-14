@@ -90,6 +90,7 @@ export class SessionCredentialCache {
   private readonly terminalInvalidationListeners = new Set<
     (lock: TerminalAuthLock) => void
   >();
+  private readonly terminalLockClearedListeners = new Set<() => void>();
   private appStateSubscription: { remove: () => void } | null = null;
 
   constructor(autoSubscribeAppState = true) {
@@ -119,6 +120,7 @@ export class SessionCredentialCache {
     this.clear();
     this.clearListeners.clear();
     this.terminalInvalidationListeners.clear();
+    this.terminalLockClearedListeners.clear();
   }
 
   onCleared(listener: () => void): () => void {
@@ -132,6 +134,13 @@ export class SessionCredentialCache {
     this.terminalInvalidationListeners.add(listener);
     return () => {
       this.terminalInvalidationListeners.delete(listener);
+    };
+  }
+
+  onTerminalLockCleared(listener: () => void): () => void {
+    this.terminalLockClearedListeners.add(listener);
+    return () => {
+      this.terminalLockClearedListeners.delete(listener);
     };
   }
 
@@ -186,8 +195,14 @@ export class SessionCredentialCache {
    * prior terminal-auth lock after an explicit credential save or deletion.
    */
   invalidateForCredentialChange(): void {
+    const hadTerminalLock = this.terminalAuthLock !== null;
     this.terminalAuthLock = null;
     this.clear();
+    if (hadTerminalLock) {
+      for (const listener of this.terminalLockClearedListeners) {
+        listener();
+      }
+    }
   }
 
   /**
@@ -217,6 +232,21 @@ export class SessionCredentialCache {
     }
     if (errorCode === 'storage_error') {
       this.clear();
+    }
+  }
+
+  /**
+   * Clears any prior terminal-auth lock after an explicit Keystore unlock
+   * succeeds (for example, Settings -> Test connection), without caching the
+   * unlocked key in memory.
+   */
+  recordReadSuccess(): void {
+    if (this.terminalAuthLock === null) {
+      return;
+    }
+    this.terminalAuthLock = null;
+    for (const listener of this.terminalLockClearedListeners) {
+      listener();
     }
   }
 
