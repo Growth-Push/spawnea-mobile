@@ -161,11 +161,11 @@ function SessionsStackNavigator({
     <SessionsStack.Navigator>
       <SessionsStack.Screen
         name="SessionsList"
-        options={{ title: 'Sessions' }}>
+        options={{ title: 'Sessions', headerShown: false }}>
         {({ navigation }) => (
           <SessionsScreen
-            onOpenSessionChatPlaceholder={() =>
-              navigation.navigate('SessionChat')
+            onOpenSessionChat={sessionId =>
+              navigation.navigate('SessionChat', { sessionId })
             }
             onOpenSettings={onOpenSettings}
           />
@@ -231,7 +231,14 @@ export function AppNavigator(): React.JSX.Element {
           options={{
             title: 'Sessions',
             tabBarLabel: 'Sessions',
+            tabBarButtonTestID: 'sessions-tab-button',
             headerShown: false,
+            tabBarStyle: {
+              backgroundColor: '#0d1117',
+              borderTopColor: '#21262d',
+            },
+            tabBarActiveTintColor: '#a78bfa',
+            tabBarInactiveTintColor: '#8b949e',
             tabBarIcon: renderSessionsTabIcon,
           }}>
           {({
