@@ -795,19 +795,57 @@ describe('SessionsScreen (FIXTURE)', () => {
   test('App integration: shares single foreground biometric unlock across Dashboard -> Sessions -> SessionChat', async () => {
     const appStateSpy = setupAppStateSpy();
     mockConfiguredKeystore();
-    const request = jest.fn().mockResolvedValue({
-      status: 200,
-      retryAfter: null,
-      body: JSON.stringify({
-        apiVersion: 'v1',
-        sessions: [
-          makeSessionFixture({
-            id: 'sess-shared-nav-1',
-            name: 'Shared Unlock Session',
-            status: 'working',
+    const sharedSession = makeSessionFixture({
+      id: 'sess-shared-nav-1',
+      name: 'Shared Unlock Session',
+      status: 'working',
+    });
+    const request = jest.fn().mockImplementation(async (req: { url: string }) => {
+      if (req.url.endsWith('/sessions/sess-shared-nav-1/history?limit=20')) {
+        return {
+          status: 200,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-shared-nav-1',
+            available: true,
+            source: 'transcript',
+            items: [],
+            hasMore: false,
           }),
-        ],
-      }),
+        };
+      }
+      if (req.url.endsWith('/sessions/sess-shared-nav-1/output?lines=200')) {
+        return {
+          status: 200,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-shared-nav-1',
+            available: true,
+            status: 'live',
+            output: 'live output line',
+          }),
+        };
+      }
+      if (req.url.endsWith('/sessions/sess-shared-nav-1')) {
+        return {
+          status: 200,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            session: sharedSession,
+          }),
+        };
+      }
+      return {
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessions: [sharedSession],
+        }),
+      };
     });
     (NativeModules as { SpawneaHttp?: unknown }).SpawneaHttp = {
       getConstants: () => ({ allowDebugLoopback: false }),
@@ -839,7 +877,7 @@ describe('SessionsScreen (FIXTURE)', () => {
       expect(request).toHaveBeenCalledTimes(2);
       expect(getAllText(renderer)).toContain('Shared Unlock Session');
 
-      // Tap card on Sessions -> opens SessionChat with sessionId.
+      // Tap card on Sessions -> opens SessionChat for sess-shared-nav-1 without extra prompt.
       const sessionCard = renderer.root.findByProps({
         testID: 'sessions-card-sess-shared-nav-1',
       });
@@ -848,10 +886,21 @@ describe('SessionsScreen (FIXTURE)', () => {
         await flushAsync(8);
       });
 
-      expect(getAllText(renderer)).toContain('Session ID: sess-shared-nav-1');
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-title' }).props
+          .children,
+      ).toBe('Shared Unlock Session');
+      expect(getAllText(renderer)).not.toContain('sess-shared-nav-1');
       expect(keystore.readKey).toHaveBeenCalledTimes(1);
+      expect(
+        request.mock.calls.some(call =>
+          String((call[0] as { url: string }).url).includes(
+            '/sessions/sess-shared-nav-1',
+          ),
+        ),
+      ).toBe(true);
 
-      // Background clears credential and hides SessionChat ID + Sessions data.
+      // Background clears credential and hides SessionChat + Sessions data.
       await ReactTestRenderer.act(async () => {
         appStateSpy.emit('background');
         await flushAsync(6);

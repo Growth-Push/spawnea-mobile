@@ -306,6 +306,97 @@ export function ActivityIcon({
   );
 }
 
+export function BackArrowIcon({
+  color = '#f0f6fc',
+  size = 16,
+}: IconProps): React.JSX.Element {
+  const head = Math.max(6, Math.round(size * 0.45));
+  return (
+    <View
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      style={[iconStyles.backWrap, { width: size, height: size }]}>
+      <View
+        style={[
+          iconStyles.backHead,
+          {
+            width: head,
+            height: head,
+            borderLeftColor: color,
+            borderBottomColor: color,
+          },
+        ]}
+      />
+      <View
+        style={[
+          iconStyles.backShaft,
+          { width: Math.max(8, size - 4), backgroundColor: color },
+        ]}
+      />
+    </View>
+  );
+}
+
+export function SendIcon({
+  color = '#ffffff',
+  size = 14,
+}: IconProps): React.JSX.Element {
+  const head = Math.max(6, Math.round(size * 0.48));
+  return (
+    <View
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      style={[iconStyles.sendWrap, { width: size, height: size }]}>
+      <View
+        style={[
+          iconStyles.sendShaft,
+          { height: Math.max(7, size - 4), backgroundColor: color },
+        ]}
+      />
+      <View
+        style={[
+          iconStyles.sendHead,
+          {
+            width: head,
+            height: head,
+            borderTopColor: color,
+            borderLeftColor: color,
+          },
+        ]}
+      />
+    </View>
+  );
+}
+
+export function ToolIcon({
+  color = '#8b949e',
+  size = 12,
+}: IconProps): React.JSX.Element {
+  const barW = Math.max(6, Math.round(size * 0.65));
+  return (
+    <View
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      style={[
+        iconStyles.toolBox,
+        { width: size, height: size, borderColor: color },
+      ]}>
+      <View
+        style={[
+          iconStyles.toolBar,
+          { width: barW, backgroundColor: color },
+        ]}
+      />
+      <View
+        style={[
+          iconStyles.toolBar,
+          { width: Math.max(4, Math.round(barW * 0.7)), backgroundColor: color },
+        ]}
+      />
+    </View>
+  );
+}
+
 const iconStyles = StyleSheet.create({
   box: {
     position: 'relative',
@@ -438,5 +529,47 @@ const iconStyles = StyleSheet.create({
     position: 'absolute',
     height: 1.25,
     left: '48%',
+  },
+  backWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  backHead: {
+    borderLeftWidth: 1.8,
+    borderBottomWidth: 1.8,
+    transform: [{ rotate: '45deg' }],
+    marginRight: -6,
+  },
+  backShaft: {
+    height: 1.8,
+    borderRadius: 1,
+  },
+  sendWrap: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sendShaft: {
+    width: 1.8,
+    borderRadius: 1,
+  },
+  sendHead: {
+    position: 'absolute',
+    top: 2,
+    borderTopWidth: 1.8,
+    borderLeftWidth: 1.8,
+    transform: [{ rotate: '45deg' }],
+  },
+  toolBox: {
+    borderWidth: 1.2,
+    borderRadius: 2.5,
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+    paddingHorizontal: 1.5,
+    gap: 1.5,
+  },
+  toolBar: {
+    height: 1.3,
+    borderRadius: 0.5,
   },
 });

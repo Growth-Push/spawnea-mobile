@@ -252,6 +252,7 @@ function isValidHistoryItem(value: unknown): value is SessionHistoryItem {
     isNonEmptyString(value.source) &&
     isOptionalString(value.timestamp) &&
     isOptionalString(value.turnId) &&
+    isOptionalString(value.turnBoundary) &&
     (value.textTruncated === undefined ||
       typeof value.textTruncated === 'boolean')
   );
@@ -335,6 +336,76 @@ function parseJsonSafe(rawBody: string): unknown | null {
   } catch {
     return null;
   }
+}
+
+const MAX_ERROR_CODE_CHARS = 64;
+
+function normalizeErrorCode(rawCode: string, rawMessage: string): string | null {
+  const trimmedCode = rawCode.trim();
+  if (
+    !trimmedCode ||
+    trimmedCode.length > MAX_ERROR_CODE_CHARS ||
+    !/^[A-Za-z0-9_.-]+$/.test(trimmedCode)
+  ) {
+    return null;
+  }
+  const lowerCode = trimmedCode.toLowerCase();
+  if (lowerCode === 'conflict') {
+    const normalizedMsg = rawMessage.toLowerCase();
+    if (
+      normalizedMsg.includes('already used with a different') ||
+      normalizedMsg.includes('different prompt')
+    ) {
+      return 'request_id_conflict';
+    }
+    if (
+      normalizedMsg.includes('open turn') ||
+      normalizedMsg.includes('turn is still open')
+    ) {
+      return 'open_turn_conflict';
+    }
+    return 'conflict';
+  }
+  return trimmedCode;
+}
+
+/**
+ * Extracts and normalizes a structured error code from a bounded non-2xx JSON
+ * response without ever retaining or forwarding raw server message text.
+ */
+function parseApiErrorBody(rawBody: string): { code: string } | null {
+  if (!rawBody) {
+    return null;
+  }
+  const parsed = parseJsonSafe(rawBody);
+  if (isRecord(parsed) && isRecord(parsed.error)) {
+    if (typeof parsed.error.code === 'string') {
+      const code = normalizeErrorCode(
+        parsed.error.code,
+        typeof parsed.error.message === 'string' ? parsed.error.message : '',
+      );
+      return code ? { code } : null;
+    }
+    return null;
+  }
+
+  // Fallback for valid >4 KiB error JSON truncated at the native byte limit.
+  const trimmed = rawBody.trimStart();
+  if (!trimmed.startsWith('{')) {
+    return null;
+  }
+  const errorMatch = /"error"\s*:\s*\{([\s\S]*)$/.exec(trimmed);
+  if (!errorMatch) {
+    return null;
+  }
+  const errorSlice = errorMatch[1];
+  const codeMatch = /"code"\s*:\s*"([A-Za-z0-9_.-]{1,64})"/.exec(errorSlice);
+  if (!codeMatch) {
+    return null;
+  }
+  const msgMatch = /"message"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(errorSlice);
+  const code = normalizeErrorCode(codeMatch[1], msgMatch ? msgMatch[1] : '');
+  return code ? { code } : null;
 }
 
 function utf8ByteLength(text: string): number {
@@ -685,11 +756,13 @@ export class SpawneaApiClient {
           this.latestUnauthorizedRequestSeq = this.requestSequence;
         }
       }
+      const parsedError = parseApiErrorBody(response.body);
       return {
         ok: false,
         category: 'unauthorized',
         status: 401,
         retryAfterSeconds: null,
+        ...(parsedError ? { errorCode: parsedError.code } : {}),
       };
     }
 
@@ -708,20 +781,24 @@ export class SpawneaApiClient {
           Math.max(existingUntil, candidateUntil),
         );
       }
+      const parsedError = parseApiErrorBody(response.body);
       return {
         ok: false,
         category: 'rate_limited',
         status: 429,
         retryAfterSeconds,
+        ...(parsedError ? { errorCode: parsedError.code } : {}),
       };
     }
 
     if (response.status < 200 || response.status >= 300) {
+      const parsedError = parseApiErrorBody(response.body);
       return {
         ok: false,
         category: 'server_error',
         status: response.status,
         retryAfterSeconds: null,
+        ...(parsedError ? { errorCode: parsedError.code } : {}),
       };
     }
 

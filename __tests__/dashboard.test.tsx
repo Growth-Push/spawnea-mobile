@@ -1117,24 +1117,63 @@ describe('DashboardScreen', () => {
     }
   });
 
-  test('navigates from App Dashboard session card to SessionChatScreen showing stable session ID', async () => {
+  test('navigates from App Dashboard session card to SessionChatScreen by session ID', async () => {
     mockConfiguredKeystore();
-    (NativeModules as { SpawneaHttp?: unknown }).SpawneaHttp = {
-      getConstants: () => ({ allowDebugLoopback: false }),
-      request: jest.fn().mockResolvedValue({
+    const navSession = makeSessionFixture({
+      id: 'sess-nav-99',
+      name: 'Navigation Target',
+      status: 'idle',
+    });
+    const request = jest.fn().mockImplementation(async (req: { url: string }) => {
+      if (req.url.endsWith('/sessions/sess-nav-99/history?limit=20')) {
+        return {
+          status: 200,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-nav-99',
+            available: true,
+            source: 'transcript',
+            items: [],
+            hasMore: false,
+          }),
+        };
+      }
+      if (req.url.endsWith('/sessions/sess-nav-99/output?lines=200')) {
+        return {
+          status: 200,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-nav-99',
+            available: true,
+            status: 'live',
+            output: 'ready',
+          }),
+        };
+      }
+      if (req.url.endsWith('/sessions/sess-nav-99')) {
+        return {
+          status: 200,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            session: navSession,
+          }),
+        };
+      }
+      return {
         status: 200,
         retryAfter: null,
         body: JSON.stringify({
           apiVersion: 'v1',
-          sessions: [
-            makeSessionFixture({
-              id: 'sess-nav-99',
-              name: 'Navigation Target',
-              status: 'idle',
-            }),
-          ],
+          sessions: [navSession],
         }),
-      }),
+      };
+    });
+    (NativeModules as { SpawneaHttp?: unknown }).SpawneaHttp = {
+      getConstants: () => ({ allowDebugLoopback: false }),
+      request,
     };
 
     let renderer!: ReactTestRenderer.ReactTestRenderer;
@@ -1152,10 +1191,18 @@ describe('DashboardScreen', () => {
         await flushAsync(8);
       });
 
-      const chatIdText = renderer.root
-        .findByProps({ testID: 'session-chat-session-id' })
-        .props.children.join('');
-      expect(chatIdText).toContain('sess-nav-99');
+      const chatTitle = renderer.root.findByProps({
+        testID: 'session-chat-title',
+      }).props.children;
+      expect(chatTitle).toBe('Navigation Target');
+      expect(getAllText(renderer)).not.toContain('sess-nav-99');
+      expect(
+        request.mock.calls.some(call =>
+          String((call[0] as { url: string }).url).includes(
+            '/sessions/sess-nav-99',
+          ),
+        ),
+      ).toBe(true);
     } finally {
       delete (NativeModules as { SpawneaHttp?: unknown }).SpawneaHttp;
       if (renderer) {
@@ -3221,22 +3268,67 @@ describe('SessionChatScreen S70-2 relock guard', () => {
     defaultSessionCredentialCache.dispose();
   });
 
-  test('S70-2 shows session ID only while unlocked in foreground and hides on background without biometrics or HTTP', async () => {
+  test('S70-2 shows session data only while unlocked in foreground and hides on background without HTTP when relock is declined', async () => {
     const appStateSpy = setupAppStateSpy();
     mockConfiguredKeystore();
-    const request = jest.fn().mockResolvedValue({
-      status: 200,
-      retryAfter: null,
-      body: JSON.stringify({
-        apiVersion: 'v1',
-        sessions: [
-          makeSessionFixture({
-            id: 'sess-chat-bg-1',
-            name: 'BG Session',
-            status: 'idle',
+    const bgSession = makeSessionFixture({
+      id: 'sess-chat-bg-1',
+      name: 'BG Session',
+      status: 'idle',
+    });
+    const request = jest.fn().mockImplementation(async (req: { url: string }) => {
+      if (req.url.endsWith('/sessions/sess-chat-bg-1/history?limit=20')) {
+        return {
+          status: 200,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-chat-bg-1',
+            available: true,
+            source: 'transcript',
+            items: [
+              {
+                id: 'item-bg-1',
+                role: 'agent',
+                text: 'Sensitive reply body',
+                source: 'transcript',
+              },
+            ],
+            hasMore: false,
           }),
-        ],
-      }),
+        };
+      }
+      if (req.url.endsWith('/sessions/sess-chat-bg-1/output?lines=200')) {
+        return {
+          status: 200,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-chat-bg-1',
+            available: true,
+            status: 'live',
+            output: 'secret terminal tail',
+          }),
+        };
+      }
+      if (req.url.endsWith('/sessions/sess-chat-bg-1')) {
+        return {
+          status: 200,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            session: bgSession,
+          }),
+        };
+      }
+      return {
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessions: [bgSession],
+        }),
+      };
     });
     (NativeModules as { SpawneaHttp?: unknown }).SpawneaHttp = {
       getConstants: () => ({ allowDebugLoopback: false }),
@@ -3258,33 +3350,37 @@ describe('SessionChatScreen S70-2 relock guard', () => {
         await flushAsync(8);
       });
 
-      expect(getAllText(renderer)).toContain('sess-chat-bg-1');
+      expect(getAllText(renderer)).toContain('BG Session');
+      expect(getAllText(renderer)).toContain('Sensitive reply body');
+      expect(getAllText(renderer)).not.toContain('sess-chat-bg-1');
       expect(keystore.readKey).toHaveBeenCalledTimes(1);
-      expect(request).toHaveBeenCalledTimes(1);
+      const requestCountBeforeBg = request.mock.calls.length;
+
+      // Cancel relock prompt if triggered on foreground return.
+      keystore.readKey.mockRejectedValueOnce({ code: 'E_AUTH_CANCELED' });
 
       await ReactTestRenderer.act(async () => {
         appStateSpy.emit('background');
         await flushAsync(4);
       });
 
-      expect(getAllText(renderer)).not.toContain('sess-chat-bg-1');
-      expect(getAllText(renderer)).toContain(
-        'Locked. Unlock from Dashboard to view this session.',
-      );
+      expect(getAllText(renderer)).not.toContain('BG Session');
+      expect(getAllText(renderer)).not.toContain('Sensitive reply body');
+      expect(getAllText(renderer)).not.toContain('secret terminal tail');
+      expect(
+        renderer.root.findAllByProps({ testID: 'session-chat-locked-card' })
+          .length,
+      ).toBeGreaterThan(0);
 
-      // Returning directly to foreground on Session/Chat must keep ID hidden
-      // and never trigger its own biometric prompt or HTTP call.
+      // Returning directly to foreground without completing biometric unlock keeps data hidden with 0 HTTP calls.
       await ReactTestRenderer.act(async () => {
         appStateSpy.emit('active');
         await flushAsync(6);
       });
 
-      expect(getAllText(renderer)).not.toContain('sess-chat-bg-1');
-      expect(getAllText(renderer)).toContain(
-        'Locked. Unlock from Dashboard to view this session.',
-      );
-      expect(keystore.readKey).toHaveBeenCalledTimes(1);
-      expect(request).toHaveBeenCalledTimes(1);
+      expect(getAllText(renderer)).not.toContain('BG Session');
+      expect(getAllText(renderer)).not.toContain('Sensitive reply body');
+      expect(request).toHaveBeenCalledTimes(requestCountBeforeBg);
     } finally {
       delete (NativeModules as { SpawneaHttp?: unknown }).SpawneaHttp;
       if (renderer) {
@@ -3296,13 +3392,53 @@ describe('SessionChatScreen S70-2 relock guard', () => {
     }
   });
 
-  test('S70-2 clears session ID on cache.clear(), invokes navigation.setParams, restores only when unlocked with param intact, and cleans up listeners', async () => {
+  test('S70-2 clears session data on cache.clear(), restores when unlocked on focus, hides on inactive, and cleans up listeners', async () => {
     const appStateSpy = setupAppStateSpy();
     mockConfiguredKeystore();
+    const clearGuardSession = makeSessionFixture({
+      id: 'sess-chat-clear-2',
+      name: 'Clear Guard Session',
+      status: 'idle',
+    });
+    const request = jest.fn().mockImplementation(async (req: { url: string }) => {
+      if (req.url.endsWith('/history?limit=20')) {
+        return {
+          status: 200,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-chat-clear-2',
+            available: true,
+            source: 'transcript',
+            items: [],
+            hasMore: false,
+          }),
+        };
+      }
+      if (req.url.endsWith('/output?lines=200')) {
+        return {
+          status: 200,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-chat-clear-2',
+            available: true,
+            status: 'live',
+            output: 'tail text',
+          }),
+        };
+      }
+      return {
+        status: 200,
+        retryAfter: null,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          session: clearGuardSession,
+        }),
+      };
+    });
     const apiClient = new SpawneaApiClient({
-      transport: {
-        request: jest.fn(),
-      },
+      transport: { request },
       allowDebugLoopback: true,
     });
     const cache = new SessionCredentialCache();
@@ -3314,12 +3450,17 @@ describe('SessionChatScreen S70-2 relock guard', () => {
 
     const setParams = jest.fn();
     const unsubscribeFocus = jest.fn();
+    const unsubscribeBlur = jest.fn();
     let focusHandler: (() => void) | undefined;
     const addListener = jest.fn((event: string, listener: () => void) => {
       if (event === 'focus') {
         focusHandler = listener;
+        return unsubscribeFocus;
       }
-      return unsubscribeFocus;
+      if (event === 'blur') {
+        return unsubscribeBlur;
+      }
+      return jest.fn();
     });
 
     const addEventListenerMock = AppState.addEventListener as unknown as jest.Mock;
@@ -3334,42 +3475,44 @@ describe('SessionChatScreen S70-2 relock guard', () => {
             navigation={{ setParams, addListener }}
             credentialCache={cache}
             apiClient={apiClient}
+            allowDebugLoopback={true}
           />,
         );
-        await flushAsync();
+        await flushAsync(8);
       });
 
-      expect(getAllText(renderer)).toContain('sess-chat-clear-2');
+      expect(getAllText(renderer)).toContain('Clear Guard Session');
+      expect(getAllText(renderer)).not.toContain('sess-chat-clear-2');
 
       await ReactTestRenderer.act(async () => {
         cache.clear();
         await flushAsync();
       });
 
-      expect(setParams).toHaveBeenCalledWith({ sessionId: undefined });
-      expect(getAllText(renderer)).not.toContain('sess-chat-clear-2');
-      expect(getAllText(renderer)).toContain(
-        'Locked. Unlock from Dashboard to view this session.',
-      );
+      expect(getAllText(renderer)).not.toContain('Clear Guard Session');
+      expect(
+        renderer.root.findAllByProps({ testID: 'session-chat-locked-card' })
+          .length,
+      ).toBeGreaterThan(0);
       expect(keystore.readKey).toHaveBeenCalledTimes(1);
 
-      // Re-unlocking while route param was not mutated externally allows display again on focus/active.
+      // Re-unlocking restores session display on focus.
       await cache.unlockAndGetCredentials({
         apiClient,
         allowDebugLoopback: true,
       });
       await ReactTestRenderer.act(async () => {
         focusHandler?.();
-        await flushAsync();
+        await flushAsync(8);
       });
-      expect(getAllText(renderer)).toContain('sess-chat-clear-2');
+      expect(getAllText(renderer)).toContain('Clear Guard Session');
 
-      // Inactive also hides ID and clears route param.
+      // Inactive also hides all session data.
       await ReactTestRenderer.act(async () => {
         appStateSpy.emit('inactive');
         await flushAsync();
       });
-      expect(getAllText(renderer)).not.toContain('sess-chat-clear-2');
+      expect(getAllText(renderer)).not.toContain('Clear Guard Session');
 
       const screenAppStateSubs = addEventListenerMock.mock.results
         .slice(subCountBeforeRender)
@@ -3380,10 +3523,16 @@ describe('SessionChatScreen S70-2 relock guard', () => {
         renderer.unmount();
       });
       expect(unsubscribeFocus).toHaveBeenCalledTimes(1);
+      expect(unsubscribeBlur).toHaveBeenCalledTimes(1);
       for (const sub of screenAppStateSubs) {
         expect(sub.remove).toHaveBeenCalledTimes(1);
       }
     } finally {
+      if (renderer) {
+        await ReactTestRenderer.act(async () => {
+          renderer.unmount();
+        });
+      }
       cache.dispose();
       appStateSpy.restore();
     }
