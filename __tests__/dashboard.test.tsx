@@ -1581,11 +1581,12 @@ describe('DashboardScreen', () => {
           .children,
       ).toContain('Connection succeeded (HTTP 200)');
 
-      // 2. Save a different URL without replacing the key -> banner cleared + cache cleared.
+      // 2. Save a different same-origin URL without replacing the key -> banner cleared + cache cleared.
+      // (A cross-origin change requires re-entering the key, so it is not a key-kept update.)
       await ReactTestRenderer.act(async () => {
         settingsRenderer.root
           .findByProps({ testID: 'server-url-input' })
-          .props.onChangeText('https://other-host.tailnet.ts.net:5757');
+          .props.onChangeText('https://workstation.tailnet.ts.net:05757');
       });
       await ReactTestRenderer.act(async () => {
         await settingsRenderer.root
