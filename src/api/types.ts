@@ -60,6 +60,7 @@ export interface SessionHistoryItem {
   source: string;
   timestamp?: string;
   turnId?: string;
+  turnBoundary?: 'start' | 'end' | 'single' | string;
   textTruncated?: boolean;
 }
 
@@ -114,4 +115,5 @@ export type ApiResult<T> =
       category: ApiErrorCategory;
       status: number | null;
       retryAfterSeconds: number | null;
+      errorCode?: string;
     };

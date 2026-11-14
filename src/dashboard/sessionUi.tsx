@@ -2,11 +2,26 @@ import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import {
   DashboardErrorKind,
-  DashboardViewState,
   formatSessionStatusLabel,
 } from './dashboardModel';
 
-export function connectionBadgeLabel(viewState: DashboardViewState): string {
+export type ConnectionBadgeState =
+  | { status: 'live' | 'empty' | 'loading' }
+  | {
+      status: 'stale';
+      errorKind: DashboardErrorKind | 'locked';
+    }
+  | { status: 'locked' }
+  | {
+      status: 'not_configured';
+      reason: 'not_configured' | 'incomplete_config' | 'invalid_url';
+    }
+  | {
+      status: 'error';
+      error: { kind: DashboardErrorKind };
+    };
+
+export function connectionBadgeLabel(viewState: ConnectionBadgeState): string {
   switch (viewState.status) {
     case 'live':
     case 'empty':
@@ -100,7 +115,7 @@ export function statusChipVisuals(status: string): {
   }
 }
 
-export function badgeVisuals(viewState: DashboardViewState): {
+export function badgeVisuals(viewState: ConnectionBadgeState): {
   container: object;
   dot: string;
   text: string;

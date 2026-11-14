@@ -16,6 +16,7 @@ import okhttp3.ConnectionPool
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
@@ -243,30 +244,40 @@ class SpawneaHttpTransport(
     val status = res.code
     val retryAfter = res.header("Retry-After")
 
-    // Skip unneeded error bodies on non-2xx responses while preserving status and Retry-After.
-    if (status !in 200..299 && !forceReadErrorBody) {
+    val responseBody = res.body
+    val isSuccess = status in 200..299
+    if (!isSuccess && !forceReadErrorBody && !isJsonResponse(res, responseBody?.contentType())) {
+      // Skip non-JSON error bodies while preserving status and Retry-After.
       return HttpTransportResult(status = status, retryAfter = retryAfter, body = "")
     }
 
-    val responseBody = res.body ?: return HttpTransportResult(status, retryAfter, "")
+    if (responseBody == null) {
+      return HttpTransportResult(status, retryAfter, "")
+    }
+
+    val maxBytes = if (isSuccess) MAX_RESPONSE_BYTES else MAX_ERROR_RESPONSE_BYTES
 
     return try {
       val bodyString =
-          readBoundedUtf8(responseBody.byteStream())
-              ?: if (status in 200..299) {
+          readBoundedUtf8(
+              stream = responseBody.byteStream(),
+              maxBytes = maxBytes,
+              truncateOnLimit = !isSuccess,
+          )
+              ?: if (isSuccess) {
                 throw TransportException("E_RESPONSE_TOO_LARGE", "Response body too large")
               } else {
                 ""
               }
       HttpTransportResult(status = status, retryAfter = retryAfter, body = bodyString)
     } catch (e: TransportException) {
-      if (status !in 200..299) {
+      if (!isSuccess) {
         HttpTransportResult(status = status, retryAfter = retryAfter, body = "")
       } else {
         throw e
       }
     } catch (e: IOException) {
-      if (status !in 200..299) {
+      if (!isSuccess) {
         // Always return status and Retry-After even if reading an error body fails.
         HttpTransportResult(status = status, retryAfter = retryAfter, body = "")
       } else if (isTimeoutIoException(e)) {
@@ -327,21 +338,39 @@ class SpawneaHttpTransport(
     }
   }
 
-  private fun readBoundedUtf8(stream: InputStream): String? {
+  private fun readBoundedUtf8(
+      stream: InputStream,
+      maxBytes: Long = MAX_RESPONSE_BYTES,
+      truncateOnLimit: Boolean = false,
+  ): String? {
     stream.use { input ->
       val out = ByteArrayOutputStream()
-      val buf = ByteArray(8192)
+      val buf = ByteArray(4096)
       var total = 0L
+      var wasTruncated = false
       while (true) {
-        val read = input.read(buf)
+        val maxToRead =
+            if (truncateOnLimit) {
+              val remaining = maxBytes - total
+              if (remaining <= 0L) {
+                wasTruncated = true
+                break
+              }
+              minOf(buf.size.toLong(), remaining).toInt()
+            } else {
+              buf.size
+            }
+        val read = input.read(buf, 0, maxToRead)
         if (read == -1) break
         total += read
-        if (total > MAX_RESPONSE_BYTES) {
+        if (!truncateOnLimit && total > maxBytes) {
           return null
         }
         out.write(buf, 0, read)
       }
-      return String(out.toByteArray(), StandardCharsets.UTF_8)
+      val bytes = out.toByteArray()
+      val validLength = if (wasTruncated) trimIncompleteTrailingUtf8(bytes) else bytes.size
+      return String(bytes, 0, validLength, StandardCharsets.UTF_8)
     }
   }
 
@@ -351,13 +380,49 @@ class SpawneaHttpTransport(
     const val MAX_MESSAGE_CHARS = 32_000
     const val MAX_CLIENT_REQUEST_ID_CHARS = 128
     const val MAX_RESPONSE_BYTES = 2L * 1024L * 1024L
+    const val MAX_ERROR_RESPONSE_BYTES = 4096L
+
+    internal fun isJsonResponse(res: Response, bodyMediaType: MediaType?): Boolean {
+      val mediaType = bodyMediaType ?: res.header("Content-Type")?.toMediaTypeOrNull() ?: return false
+      return mediaType.type.equals("application", ignoreCase = true) &&
+          (mediaType.subtype.equals("json", ignoreCase = true) ||
+              mediaType.subtype.endsWith("+json", ignoreCase = true))
+    }
+
+    /**
+     * When a byte buffer is hard-capped in the middle of a multi-byte UTF-8 sequence,
+     * trims the incomplete trailing sequence so UTF-8 decoding never emits U+FFFD.
+     */
+    internal fun trimIncompleteTrailingUtf8(bytes: ByteArray): Int {
+      val len = bytes.size
+      if (len == 0) return 0
+      var continuationCount = 0
+      var idx = len - 1
+      while (idx >= 0 && continuationCount < 3 && (bytes[idx].toInt() and 0xC0) == 0x80) {
+        continuationCount++
+        idx--
+      }
+      if (idx < 0) return len
+      val lead = bytes[idx].toInt() and 0xFF
+      val expectedLen =
+          when {
+            (lead and 0x80) == 0 -> 1
+            (lead and 0xE0) == 0xC0 -> 2
+            (lead and 0xF0) == 0xE0 -> 3
+            (lead and 0xF8) == 0xF0 -> 4
+            else -> return len
+          }
+      val availableLen = len - idx
+      return if (availableLen < expectedLen) idx else len
+    }
 
     fun shouldRetryStaleGet(method: String, attempt: Int, errorCode: String): Boolean =
         method.equals("GET", ignoreCase = true) && attempt == 0 && errorCode == "E_NETWORK_ERROR"
 
     fun defaultOkHttpClient(): OkHttpClient =
         OkHttpClient.Builder()
-            .connectionPool(ConnectionPool(4, 15, TimeUnit.SECONDS))
+            // Keep-alive TTL stays below Node's 5s server keepAliveTimeout so 10s polls and single-shot POSTs never pull stale half-closed sockets.
+            .connectionPool(ConnectionPool(4, 2, TimeUnit.SECONDS))
             .followRedirects(false)
             .followSslRedirects(false)
             .retryOnConnectionFailure(false)

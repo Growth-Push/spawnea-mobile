@@ -173,9 +173,11 @@ function SessionsStackNavigator({
       </SessionsStack.Screen>
       <SessionsStack.Screen
         name="SessionChat"
-        component={SessionChatScreen}
-        options={{ title: 'Session / Chat' }}
-      />
+        options={{ title: 'Session / Chat', headerShown: false }}>
+        {props => (
+          <SessionChatScreen {...props} onOpenSettings={onOpenSettings} />
+        )}
+      </SessionsStack.Screen>
     </SessionsStack.Navigator>
   );
 }

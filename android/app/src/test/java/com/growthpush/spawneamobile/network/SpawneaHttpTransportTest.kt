@@ -648,4 +648,138 @@ class SpawneaHttpTransportTest {
       assertEquals(1, connections.get())
     }
   }
+
+  @Test
+  fun returnsJsonErrorBodyForNon2xxResponsesWithoutLoggingBodiesOrHeaders() {
+    val diagnostics = mutableListOf<String>()
+    val secretHeaderValue = "Bearer top-secret-key-999"
+    val json409Body =
+        """{"apiVersion":"v1","error":{"code":"conflict","message":"Client request ID 'req-1' was already used with a different prompt"}}"""
+    val json422Body =
+        """{"apiVersion":"v1","error":{"code":"needs_human","message":"Session requires human confirmation"}}"""
+    val hits = AtomicInteger(0)
+
+    val (server, done) =
+        startLoopbackServer(expectedConnections = 2) { idx, sock ->
+          readSingleHttpRequest(sock)
+          hits.incrementAndGet()
+          val out = sock.getOutputStream()
+          if (idx == 1) {
+            val bytes = json409Body.toByteArray(StandardCharsets.UTF_8)
+            out.write(
+                ("HTTP/1.1 409 Conflict\r\nContent-Type: application/json; charset=utf-8\r\nConnection: close\r\nContent-Length: ${bytes.size}\r\n\r\n")
+                    .toByteArray(StandardCharsets.US_ASCII))
+            out.write(bytes)
+          } else {
+            val bytes = json422Body.toByteArray(StandardCharsets.UTF_8)
+            out.write(
+                ("HTTP/1.1 422 Unprocessable Entity\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ${bytes.size}\r\n\r\n")
+                    .toByteArray(StandardCharsets.US_ASCII))
+            out.write(bytes)
+          }
+          out.flush()
+        }
+
+    server.use {
+      val transport =
+          SpawneaHttpTransport(
+              allowCleartextLoopback = true,
+              onDiagnostic = { diagnostics.add(it) },
+          )
+
+      val res409 =
+          transport.executeSync(
+              method = "POST",
+              rawUrl = "http://127.0.0.1:${server.localPort}/api/v1/sessions/s1/message",
+              headers = mapOf("Authorization" to secretHeaderValue),
+              body = """{"message":"hi","clientRequestId":"req-1"}""",
+              timeoutMs = 3000L,
+          )
+      assertEquals(409, res409.status)
+      assertEquals(json409Body, res409.body)
+
+      val latch = CountDownLatch(1)
+      var asyncRes: HttpTransportResult? = null
+      var asyncErr: String? = null
+      transport.executeAsync(
+          method = "POST",
+          rawUrl = "http://127.0.0.1:${server.localPort}/api/v1/sessions/s1/message",
+          headers = mapOf("Authorization" to secretHeaderValue),
+          body = """{"message":"hi2","clientRequestId":"req-2"}""",
+          timeoutMs = 3000L,
+          onSuccess = {
+            asyncRes = it
+            latch.countDown()
+          },
+          onError = {
+            asyncErr = it
+            latch.countDown()
+          },
+      )
+      assertTrue(latch.await(3, TimeUnit.SECONDS))
+      assertEquals(null, asyncErr)
+      assertEquals(422, asyncRes?.status)
+      assertEquals(json422Body, asyncRes?.body)
+
+      assertTrue(done.await(3, TimeUnit.SECONDS))
+      assertEquals(2, hits.get())
+      assertTrue(diagnostics.none { it.contains("already used") || it.contains(secretHeaderValue) })
+    }
+  }
+
+  @Test
+  fun boundsOverlongJsonErrorBodyTo4KiBWithUtf8BoundarySafetyAndSkipsHtmlErrors() {
+    val transport = SpawneaHttpTransport(allowCleartextLoopback = true)
+    // Prefix 4094 ASCII bytes followed by a 4-byte emoji splitting directly across the 4096-byte limit.
+    val prefix = """{"error":{"code":"conflict","message":"""" + "a".repeat(4055) + "\uD83D\uDE80"
+    val suffix = """tail"}}"""
+    val fullJsonBytes = (prefix + suffix).toByteArray(StandardCharsets.UTF_8)
+    assertTrue(fullJsonBytes.size > SpawneaHttpTransport.MAX_ERROR_RESPONSE_BYTES)
+
+    val (server, done) =
+        startLoopbackServer(expectedConnections = 2) { idx, sock ->
+          readSingleHttpRequest(sock)
+          val out = sock.getOutputStream()
+          if (idx == 1) {
+            out.write(
+                ("HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ${fullJsonBytes.size}\r\n\r\n")
+                    .toByteArray(StandardCharsets.US_ASCII))
+            out.write(fullJsonBytes)
+          } else {
+            val html = "<html><body>Bad Gateway</body></html>"
+            out.write(
+                ("HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: ${html.length}\r\n\r\n$html")
+                    .toByteArray(StandardCharsets.US_ASCII))
+          }
+          out.flush()
+        }
+
+    server.use {
+      val res409 =
+          transport.executeSync(
+              method = "POST",
+              rawUrl = "http://127.0.0.1:${server.localPort}/api/v1/sessions/s1/message",
+              headers = mapOf("Authorization" to "Bearer test-key"),
+              body = """{"message":"hi","clientRequestId":"req-long"}""",
+              timeoutMs = 3000L,
+          )
+      assertEquals(409, res409.status)
+      val returnedBytes = res409.body.toByteArray(StandardCharsets.UTF_8)
+      assertTrue(returnedBytes.size <= SpawneaHttpTransport.MAX_ERROR_RESPONSE_BYTES.toInt())
+      assertFalse(res409.body.contains('\uFFFD'))
+      assertTrue(res409.body.contains("\"code\":\"conflict\""))
+
+      val res502 =
+          transport.executeSync(
+              method = "GET",
+              rawUrl = "http://127.0.0.1:${server.localPort}/api/v1/sessions",
+              headers = mapOf("Authorization" to "Bearer test-key"),
+              body = null,
+              timeoutMs = 3000L,
+          )
+      assertEquals(502, res502.status)
+      assertEquals("", res502.body)
+      assertTrue(done.await(3, TimeUnit.SECONDS))
+    }
+  }
 }
