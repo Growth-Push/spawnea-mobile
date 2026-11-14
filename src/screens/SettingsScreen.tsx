@@ -35,9 +35,14 @@ import {
   updateSavedServerUrl,
 } from '../storage/keyStorage';
 import { clearLegacyServerUrl } from '../storage/urlStorage';
+import {
+  defaultSessionCredentialCache,
+  SessionCredentialCache,
+} from '../storage/sessionCredentialCache';
 
 interface SettingsScreenProps {
   apiClient?: SpawneaApiClient;
+  credentialCache?: SessionCredentialCache;
   allowDebugLoopback?: boolean;
 }
 
@@ -63,6 +68,7 @@ function formatCapabilityLabel(capability: BiometryCapability | null): string {
 
 export function SettingsScreen({
   apiClient = defaultApiClient,
+  credentialCache = defaultSessionCredentialCache,
   allowDebugLoopback,
 }: SettingsScreenProps): React.JSX.Element {
   const effectiveAllowDebugLoopback =
@@ -116,7 +122,7 @@ export function SettingsScreen({
     });
     return () => {
       unsubscribeFocus?.();
-      appStateSub.remove();
+      appStateSub?.remove?.();
     };
   }, [navigation, refreshStatus]);
 
@@ -132,8 +138,11 @@ export function SettingsScreen({
     setIsIncomplete(restoredState.incomplete);
     setCapability(bioCap);
 
+    credentialCache.recordSaveOutcome(result);
+
     if (result.errorCode === 'commit_uncertain') {
       setServerUrl(restoredState.serverUrl ?? '');
+      setTestBanner(null);
       apiClient.notifyCredentialsChanged();
       setSaveBanner({
         tone: 'error',
@@ -205,6 +214,7 @@ export function SettingsScreen({
         // Clear plaintext input immediately so the key is never kept in UI state.
         setApiKeyInput('');
         setTestBanner(null);
+        credentialCache.recordSaveOutcome({ ok: true });
         apiClient.notifyCredentialsChanged();
 
         setSaveBanner({
@@ -245,6 +255,11 @@ export function SettingsScreen({
         setServerUrl(urlCheck.normalizedUrl);
         setHasSavedKey(true);
         setIsIncomplete(false);
+        credentialCache.recordSaveOutcome({ ok: true });
+        if (existingState.serverUrl !== urlCheck.normalizedUrl) {
+          // notifyCredentialsChanged already ran right after the URL update above.
+          setTestBanner(null);
+        }
         setSaveBanner({
           tone: 'success',
           message:
@@ -255,6 +270,7 @@ export function SettingsScreen({
       setCapability(await getBiometryCapability());
     } catch {
       setApiKeyInput('');
+      credentialCache.clear();
       await refreshState().catch(() => undefined);
       setSaveBanner({
         tone: 'error',
@@ -273,6 +289,7 @@ export function SettingsScreen({
     try {
       const deleteResult = await deleteApiKey();
       if (!deleteResult.ok) {
+        credentialCache.clear();
         await refreshState().catch(() => undefined);
         setSaveBanner({ tone: 'error', message: deleteResult.message });
         return;
@@ -294,6 +311,7 @@ export function SettingsScreen({
         afterState.serverUrl !== null ||
         afterState.incomplete
       ) {
+        credentialCache.clear();
         setSaveBanner({
           tone: 'error',
           message: 'Failed to verify removal of the saved API key.',
@@ -301,6 +319,7 @@ export function SettingsScreen({
         return;
       }
 
+      credentialCache.invalidateForCredentialChange();
       apiClient.notifyCredentialsChanged();
       setSaveBanner({
         tone: 'neutral',
@@ -308,6 +327,7 @@ export function SettingsScreen({
           'Local settings removed from this device. The server key was not revoked.',
       });
     } catch {
+      credentialCache.clear();
       await refreshState().catch(() => undefined);
       setSaveBanner({
         tone: 'error',
@@ -328,10 +348,15 @@ export function SettingsScreen({
       setHasSavedKey(savedState.hasKey);
       setIsIncomplete(savedState.incomplete);
       if (!savedState.hasKey || !savedState.serverUrl || savedState.incomplete) {
+        const missingMsg =
+          'Incomplete configuration. Save your server URL and API key first.';
+        credentialCache.invalidateForTerminalAuth(
+          savedState.incomplete ? 'incomplete_config' : 'not_configured',
+          missingMsg,
+        );
         setTestBanner({
           tone: 'error',
-          message:
-            'Incomplete configuration. Save your server URL and API key first.',
+          message: missingMsg,
         });
         return;
       }
@@ -341,6 +366,7 @@ export function SettingsScreen({
         effectiveAllowDebugLoopback,
       );
       if (!urlCheck.valid) {
+        credentialCache.invalidateForTerminalAuth('invalid_url', urlCheck.message);
         setTestBanner({
           tone: 'error',
           message: urlCheck.message,
@@ -352,6 +378,10 @@ export function SettingsScreen({
         'Unlock your saved API key to test the server connection',
       );
       if (!unlockResult.ok) {
+        credentialCache.recordReadFailure(
+          unlockResult.errorCode,
+          unlockResult.message,
+        );
         setCapability(await getBiometryCapability());
         setTestBanner({
           tone:

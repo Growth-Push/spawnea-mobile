@@ -56,10 +56,14 @@ jest.mock('react-native-screens', () => {
   return {
     enableScreens: jest.fn(),
     screensEnabled: jest.fn(() => false),
+    compatibilityFlags: {},
+    featureFlags: { experiment: {} },
     Screen: ({ children, ...props }) => React.createElement(View, props, children),
     ScreenContainer: ({ children, ...props }) =>
       React.createElement(View, props, children),
     ScreenStack: ({ children, ...props }) =>
+      React.createElement(View, props, children),
+    ScreenStackItem: ({ children, ...props }) =>
       React.createElement(View, props, children),
     ScreenStackHeaderConfig: () => null,
     ScreenStackHeaderSubview: () => null,

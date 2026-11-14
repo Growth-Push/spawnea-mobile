@@ -1,10 +1,32 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
-export function SessionChatScreen(): React.JSX.Element {
+interface SessionChatScreenProps {
+  route?: {
+    params?: {
+      sessionId?: string;
+    };
+  };
+  sessionId?: string;
+}
+
+export function SessionChatScreen({
+  route,
+  sessionId: directSessionId,
+}: SessionChatScreenProps): React.JSX.Element {
+  const sessionId = directSessionId ?? route?.params?.sessionId;
+
   return (
     <View style={styles.container} testID="session-chat-screen">
       <Text style={styles.title}>Session / Chat</Text>
+      {sessionId ? (
+        <View style={styles.selectedCard}>
+          <Text style={styles.selectedLabel}>Selected session</Text>
+          <Text style={styles.sessionIdText} testID="session-chat-session-id">
+            Session ID: {sessionId}
+          </Text>
+        </View>
+      ) : null}
       <View style={styles.card}>
         <Text style={styles.cardHeading}>Not available yet</Text>
         <Text style={styles.cardBody}>
@@ -26,6 +48,25 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 24,
     fontWeight: '700',
+    color: '#0f172a',
+  },
+  selectedCard: {
+    backgroundColor: '#eff6ff',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
+    padding: 14,
+    gap: 4,
+  },
+  selectedLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#1d4ed8',
+    textTransform: 'uppercase',
+  },
+  sessionIdText: {
+    fontSize: 14,
+    fontWeight: '600',
     color: '#0f172a',
   },
   card: {

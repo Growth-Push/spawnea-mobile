@@ -47,18 +47,18 @@ describe('App navigation shell', () => {
     await AsyncStorage.clear();
   });
 
-  test('renders navigation shell with honest placeholders and no fake sessions', async () => {
+  test('renders navigation shell with honest unconfigured dashboard and no fake sessions', async () => {
     let renderer!: ReactTestRenderer.ReactTestRenderer;
     await ReactTestRenderer.act(async () => {
       renderer = ReactTestRenderer.create(<App />);
       await flushAsync();
     });
 
-    const serialized = JSON.stringify(renderer.toJSON());
+    const serialized = getAllTextContent(renderer);
     expect(serialized).toContain('Dashboard');
     expect(serialized).toContain('Sessions');
     expect(serialized).toContain('Settings');
-    expect(serialized).toContain('Not available yet');
+    expect(serialized).toContain('Not configured');
     expect(serialized).not.toContain('sess-');
 
     await ReactTestRenderer.act(async () => {
