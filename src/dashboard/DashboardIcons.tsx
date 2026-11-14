@@ -244,6 +244,68 @@ export function ChevronIcon({
   );
 }
 
+export function ProjectIcon({
+  color = '#8b949e',
+  size = 12,
+}: IconProps): React.JSX.Element {
+  const tabW = Math.max(4, Math.round(size * 0.44));
+  const bodyH = Math.max(7, Math.round(size * 0.68));
+  return (
+    <View
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      style={[iconStyles.projectWrap, { width: size, height: size }]}>
+      <View
+        style={[
+          iconStyles.projectTab,
+          { width: tabW, backgroundColor: color },
+        ]}
+      />
+      <View
+        style={[
+          iconStyles.projectBody,
+          { width: size, height: bodyH, borderColor: color },
+        ]}
+      />
+    </View>
+  );
+}
+
+export function ActivityIcon({
+  color = '#8b949e',
+  size = 12,
+}: IconProps): React.JSX.Element {
+  const handV = Math.max(3, Math.round(size * 0.28));
+  const handH = Math.max(3, Math.round(size * 0.26));
+  return (
+    <View
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      style={[
+        iconStyles.clockRing,
+        {
+          width: size,
+          height: size,
+          borderRadius: size / 2,
+          borderColor: color,
+        },
+      ]}>
+      <View
+        style={[
+          iconStyles.clockHandVertical,
+          { height: handV, backgroundColor: color },
+        ]}
+      />
+      <View
+        style={[
+          iconStyles.clockHandHorizontal,
+          { width: handH, backgroundColor: color },
+        ]}
+      />
+    </View>
+  );
+}
+
 const iconStyles = StyleSheet.create({
   box: {
     position: 'relative',
@@ -348,5 +410,33 @@ const iconStyles = StyleSheet.create({
   chevron: {
     borderRightWidth: 1.6,
     borderBottomWidth: 1.6,
+  },
+  projectWrap: {
+    justifyContent: 'flex-end',
+  },
+  projectTab: {
+    height: 2,
+    borderTopLeftRadius: 1.5,
+    borderTopRightRadius: 1.5,
+    marginBottom: -1,
+  },
+  projectBody: {
+    borderWidth: 1.25,
+    borderRadius: 2,
+  },
+  clockRing: {
+    borderWidth: 1.25,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  clockHandVertical: {
+    position: 'absolute',
+    width: 1.25,
+    top: '24%',
+  },
+  clockHandHorizontal: {
+    position: 'absolute',
+    height: 1.25,
+    left: '48%',
   },
 });
