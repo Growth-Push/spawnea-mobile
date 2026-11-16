@@ -11,6 +11,7 @@ import {
   ActivityIndicator,
   Keyboard,
   LayoutChangeEvent,
+  Modal,
   NativeScrollEvent,
   NativeSyntheticEvent,
   Platform,
@@ -30,7 +31,7 @@ import {
   clearUnresolvedSubmission,
   ComposerSubmission,
   createClientRequestId,
-  DEFAULT_OUTPUT_PREVIEW_LINES,
+  DELIVERED_BANNER_DURATION_MS,
   evaluateRetryGate,
   evaluateSendGate,
   formatFetchTime,
@@ -114,6 +115,255 @@ function formatHistorySourceLabel(source: 'transcript' | 'screen'): string {
 
 let screenInstanceSeq = 0;
 
+/**
+ * Shared bottom-pinned auto-follow controller for scrollable transcripts and terminal views.
+ * Positions at the end on initial layout and follows content updates (including same-height
+ * content replacements) only while pinned near the bottom and not actively dragged.
+ */
+function useBottomFollowScroll(params: {
+  contentKey: string | null;
+  enabled: boolean;
+  bottomThresholdPx?: number;
+  layoutDeltaThresholdPx: number;
+  mountedRef: React.MutableRefObject<boolean>;
+  now: () => number;
+}) {
+  const {
+    contentKey,
+    enabled,
+    bottomThresholdPx,
+    layoutDeltaThresholdPx,
+    mountedRef,
+    now,
+  } = params;
+  const scrollViewRef = useRef<React.ComponentRef<typeof ScrollView> | null>(
+    null,
+  );
+  const isPinnedToBottomRef = useRef(true);
+  const hasInitialScrolledRef = useRef(false);
+  const lastAutoScrolledHeightRef = useRef(0);
+  const lastAutoScrolledContentKeyRef = useRef<string | null>(null);
+  const userDraggingRef = useRef(false);
+  const suppressAutoUnpinUntilRef = useRef(0);
+  const viewportHeightRef = useRef(0);
+  const contentHeightRef = useRef(0);
+  const followRafRef = useRef<number | null>(null);
+  const followTimeoutsRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
+  const contentKeyRef = useRef(contentKey);
+  contentKeyRef.current = contentKey;
+
+  const cancelPendingFollow = useCallback(() => {
+    if (
+      followRafRef.current !== null &&
+      typeof cancelAnimationFrame === 'function'
+    ) {
+      cancelAnimationFrame(followRafRef.current);
+    }
+    followRafRef.current = null;
+    if (followTimeoutsRef.current.length > 0) {
+      for (const timer of followTimeoutsRef.current) {
+        clearTimeout(timer);
+      }
+      followTimeoutsRef.current = [];
+    }
+  }, []);
+
+  const reset = useCallback(() => {
+    cancelPendingFollow();
+    hasInitialScrolledRef.current = false;
+    isPinnedToBottomRef.current = true;
+    lastAutoScrolledHeightRef.current = 0;
+    lastAutoScrolledContentKeyRef.current = null;
+    userDraggingRef.current = false;
+    suppressAutoUnpinUntilRef.current = 0;
+  }, [cancelPendingFollow]);
+
+  useEffect(() => {
+    if (!enabled) {
+      reset();
+    }
+  }, [enabled, reset]);
+
+  useEffect(() => () => cancelPendingFollow(), [cancelPendingFollow]);
+
+  const applyNativeScrollToBottom = useCallback(() => {
+    const scrollView = scrollViewRef.current;
+    if (
+      !mountedRef.current ||
+      !scrollView ||
+      !enabledRef.current ||
+      !isPinnedToBottomRef.current ||
+      userDraggingRef.current
+    ) {
+      return;
+    }
+    suppressAutoUnpinUntilRef.current = now() + 400;
+    const contentHeight = contentHeightRef.current;
+    const viewportHeight = viewportHeightRef.current;
+    if (contentHeight > viewportHeight && viewportHeight > 0) {
+      scrollView.scrollTo?.({
+        y: Math.max(0, contentHeight - viewportHeight),
+        animated: false,
+      });
+    }
+    scrollView.scrollToEnd?.({ animated: false });
+  }, [mountedRef, now]);
+
+  const scrollToBottomNow = useCallback(
+    (contentHeight?: number) => {
+      if (
+        !scrollViewRef.current ||
+        !enabledRef.current ||
+        userDraggingRef.current
+      ) {
+        return;
+      }
+      hasInitialScrolledRef.current = true;
+      if (typeof contentHeight === 'number' && contentHeight > 0) {
+        contentHeightRef.current = contentHeight;
+        lastAutoScrolledHeightRef.current = contentHeight;
+      }
+      lastAutoScrolledContentKeyRef.current = contentKeyRef.current;
+      cancelPendingFollow();
+      applyNativeScrollToBottom();
+      // Android Fabric can commit child layout a frame later; retry briefly while still pinned.
+      if (typeof requestAnimationFrame === 'function') {
+        followRafRef.current = requestAnimationFrame(() => {
+          followRafRef.current = null;
+          applyNativeScrollToBottom();
+        });
+      }
+      followTimeoutsRef.current = [
+        setTimeout(() => {
+          applyNativeScrollToBottom();
+        }, 80),
+        setTimeout(() => {
+          applyNativeScrollToBottom();
+        }, 280),
+      ];
+    },
+    [applyNativeScrollToBottom, cancelPendingFollow],
+  );
+
+  // Follow updates whose total pixel height/width stays identical (e.g. rolling tail lines).
+  useEffect(() => {
+    if (
+      !enabled ||
+      contentKey === null ||
+      !hasInitialScrolledRef.current ||
+      !isPinnedToBottomRef.current ||
+      userDraggingRef.current
+    ) {
+      return;
+    }
+    if (contentKey !== lastAutoScrolledContentKeyRef.current) {
+      scrollToBottomNow(contentHeightRef.current);
+    }
+  }, [contentKey, enabled, scrollToBottomNow]);
+
+  const updatePinnedStateFromMetrics = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
+      if (layoutMeasurement?.height && layoutMeasurement.height > 0) {
+        viewportHeightRef.current = layoutMeasurement.height;
+      }
+      if (contentSize?.height && contentSize.height > 0) {
+        contentHeightRef.current = contentSize.height;
+      }
+      isPinnedToBottomRef.current = isScrollNearBottom({
+        offsetY: contentOffset?.y ?? 0,
+        viewportHeight: viewportHeightRef.current,
+        contentHeight: contentHeightRef.current,
+        ...(bottomThresholdPx !== undefined
+          ? { thresholdPx: bottomThresholdPx }
+          : {}),
+      });
+    },
+    [bottomThresholdPx],
+  );
+
+  const handleScrollBeginDrag = useCallback(() => {
+    userDraggingRef.current = true;
+    suppressAutoUnpinUntilRef.current = 0;
+    cancelPendingFollow();
+  }, [cancelPendingFollow]);
+
+  const handleScroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      if (!hasInitialScrolledRef.current) {
+        return;
+      }
+      if (userDraggingRef.current || now() >= suppressAutoUnpinUntilRef.current) {
+        updatePinnedStateFromMetrics(event);
+      }
+    },
+    [now, updatePinnedStateFromMetrics],
+  );
+
+  const handleScrollEnd = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      userDraggingRef.current = false;
+      updatePinnedStateFromMetrics(event);
+    },
+    [updatePinnedStateFromMetrics],
+  );
+
+  const handleLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      const nextHeight = event.nativeEvent.layout.height;
+      const prevHeight = viewportHeightRef.current;
+      viewportHeightRef.current = nextHeight;
+      if (
+        nextHeight > 0 &&
+        enabledRef.current &&
+        isPinnedToBottomRef.current &&
+        !userDraggingRef.current &&
+        contentHeightRef.current > nextHeight &&
+        (!hasInitialScrolledRef.current ||
+          prevHeight === 0 ||
+          Math.abs(nextHeight - prevHeight) > layoutDeltaThresholdPx)
+      ) {
+        scrollToBottomNow(contentHeightRef.current);
+      }
+    },
+    [layoutDeltaThresholdPx, scrollToBottomNow],
+  );
+
+  const handleContentSizeChange = useCallback(
+    (_width: number, contentHeight: number) => {
+      contentHeightRef.current = contentHeight;
+      if (!enabledRef.current || contentHeight <= 0) {
+        return;
+      }
+      if (!hasInitialScrolledRef.current) {
+        scrollToBottomNow(contentHeight);
+        return;
+      }
+      if (
+        isPinnedToBottomRef.current &&
+        !userDraggingRef.current &&
+        (Math.abs(contentHeight - lastAutoScrolledHeightRef.current) > 2 ||
+          contentKeyRef.current !== lastAutoScrolledContentKeyRef.current)
+      ) {
+        scrollToBottomNow(contentHeight);
+      }
+    },
+    [scrollToBottomNow],
+  );
+
+  return {
+    scrollViewRef,
+    reset,
+    handleLayout,
+    handleContentSizeChange,
+    handleScrollBeginDrag,
+    handleScroll,
+    handleScrollEnd,
+  };
+}
+
 export function SessionChatScreen({
   route,
   navigation: navigationProp,
@@ -139,7 +389,8 @@ export function SessionChatScreen({
   const [expandedToolGroups, setExpandedToolGroups] = useState<
     Record<string, boolean>
   >({});
-  const [outputLinesExpanded, setOutputLinesExpanded] = useState(false);
+  const [outputModalOpen, setOutputModalOpen] = useState(false);
+  const [outputWrapEnabled, setOutputWrapEnabled] = useState(false);
 
   const [draftText, setDraftText] = useState('');
   const [draftRequestId, setDraftRequestId] = useState(() =>
@@ -148,21 +399,7 @@ export function SessionChatScreen({
   const [submission, setSubmission] = useState<ComposerSubmission | null>(null);
   const [keyboardBottomPadding, setKeyboardBottomPadding] = useState(0);
   const screenRootRef = useRef<React.ComponentRef<typeof View> | null>(null);
-  const scrollViewRef = useRef<React.ComponentRef<typeof ScrollView> | null>(
-    null,
-  );
-  const isPinnedToBottomRef = useRef(true);
-  const hasInitialScrolledRef = useRef(false);
-  const lastAutoScrolledHeightRef = useRef(0);
-  const lastAutoScrolledContentKeyRef = useRef<string | null>(null);
-  const userDraggingRef = useRef(false);
-  const suppressAutoUnpinUntilRef = useRef(0);
-  const scrollViewportHeightRef = useRef(0);
-  const scrollContentHeightRef = useRef(0);
-  const scrollFollowRafRef = useRef<number | null>(null);
-  const scrollFollowTimeoutsRef = useRef<Array<ReturnType<typeof setTimeout>>>(
-    [],
-  );
+  const resetScrollFollowRef = useRef<(() => void) | null>(null);
   const submitLockRef = useRef(false);
   const mountedRef = useRef(true);
   const sessionEpochRef = useRef(0);
@@ -176,31 +413,14 @@ export function SessionChatScreen({
   const currentSessionIdRef = useRef<string | undefined>(rawSessionId);
   currentSessionIdRef.current = rawSessionId;
 
-  const cancelPendingScrollFollow = useCallback(() => {
-    if (
-      scrollFollowRafRef.current !== null &&
-      typeof cancelAnimationFrame === 'function'
-    ) {
-      cancelAnimationFrame(scrollFollowRafRef.current);
-    }
-    scrollFollowRafRef.current = null;
-    if (scrollFollowTimeoutsRef.current.length > 0) {
-      for (const timer of scrollFollowTimeoutsRef.current) {
-        clearTimeout(timer);
-      }
-      scrollFollowTimeoutsRef.current = [];
-    }
-  }, []);
-
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       sessionEpochRef.current += 1;
       submitLockRef.current = false;
-      cancelPendingScrollFollow();
     };
-  }, [cancelPendingScrollFollow]);
+  }, []);
 
   useEffect(() => {
     const showEvent =
@@ -244,22 +464,17 @@ export function SessionChatScreen({
 
   const clearPrivateUiState = useCallback(() => {
     sessionEpochRef.current += 1;
-    cancelPendingScrollFollow();
+    resetScrollFollowRef.current?.();
     setExpandedToolGroups({});
-    setOutputLinesExpanded(false);
+    setOutputModalOpen(false);
+    setOutputWrapEnabled(false);
     setDraftText('');
     submissionStatusRef.current = null;
     setSubmission(null);
     setKeyboardBottomPadding(0);
-    hasInitialScrolledRef.current = false;
-    isPinnedToBottomRef.current = true;
-    lastAutoScrolledHeightRef.current = 0;
-    lastAutoScrolledContentKeyRef.current = null;
-    userDraggingRef.current = false;
-    suppressAutoUnpinUntilRef.current = 0;
     submitLockRef.current = false;
     setDraftRequestId(createClientRequestId(now()));
-  }, [cancelPendingScrollFollow, now]);
+  }, [now]);
 
   // Reset composer and expansion state when switching to a different session ID.
   const prevSessionIdRef = useRef<string | undefined>(rawSessionId);
@@ -453,12 +668,26 @@ export function SessionChatScreen({
     }));
   }, []);
 
+  const handleOpenOutputModal = useCallback(() => {
+    setOutputWrapEnabled(false);
+    setOutputModalOpen(true);
+  }, []);
+
+  const handleCloseOutputModal = useCallback(() => {
+    setOutputModalOpen(false);
+  }, []);
+
+  const handleToggleOutputWrap = useCallback(() => {
+    setOutputWrapEnabled(prev => !prev);
+  }, []);
+
   const handleDraftChange = useCallback(
     (nextText: string) => {
       if (submission?.status === 'unknown' || submission?.status === 'pending') {
         return;
       }
-      if (submission !== null) {
+      if (submission?.status === 'failed') {
+        submissionStatusRef.current = null;
         setSubmission(null);
         setDraftRequestId(createClientRequestId(now()));
       }
@@ -781,6 +1010,33 @@ export function SessionChatScreen({
     setDraftRequestId(createClientRequestId(now()));
   }, [credentialCache, now, restoreScopeKey, submission?.status]);
 
+  useEffect(() => {
+    if (submission?.status !== 'delivered') {
+      return;
+    }
+    if (!isFocused) {
+      submissionStatusRef.current = null;
+      setSubmission(prev => (prev?.status === 'delivered' ? null : prev));
+      return;
+    }
+    const activeDelivered = submission;
+    const timer = setTimeout(() => {
+      if (!mountedRef.current) {
+        return;
+      }
+      setSubmission(prev => {
+        if (prev === activeDelivered) {
+          submissionStatusRef.current = null;
+          return null;
+        }
+        return prev;
+      });
+    }, DELIVERED_BANNER_DURATION_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [isFocused, submission]);
+
   const turnGroups = useMemo(
     () =>
       activeSnapshot && activeSnapshot.historyAvailable
@@ -792,13 +1048,9 @@ export function SessionChatScreen({
   const outputTail = useMemo(
     () =>
       activeSnapshot && activeSnapshot.outputAvailable
-        ? sliceOutputTail(
-            activeSnapshot.outputText,
-            outputLinesExpanded,
-            DEFAULT_OUTPUT_PREVIEW_LINES,
-          )
+        ? sliceOutputTail(activeSnapshot.outputText, true)
         : null,
-    [activeSnapshot, outputLinesExpanded],
+    [activeSnapshot],
   );
 
   const session = activeSnapshot?.session ?? null;
@@ -819,173 +1071,39 @@ export function SessionChatScreen({
         latestHistoryItem?.id ?? '',
         latestHistoryItem?.text.length ?? 0,
         (activeSnapshot.outputText ?? '').length,
-        outputLinesExpanded ? '1' : '0',
-        submission?.status ?? '',
+        submission?.status && submission.status !== 'delivered'
+          ? submission.status
+          : '',
       ].join(':')
     : null;
 
-  const activeSnapshotRef = useRef(activeSnapshot);
-  activeSnapshotRef.current = activeSnapshot;
-  const scrollContentKeyRef = useRef<string | null>(scrollContentKey);
-  scrollContentKeyRef.current = scrollContentKey;
+  const outputInlineText =
+    activeSnapshot &&
+    activeSnapshot.outputAvailable &&
+    outputTail &&
+    outputTail.totalLines > 0
+      ? outputTail.visibleText
+      : null;
 
-  useEffect(() => {
-    if (!activeSnapshot) {
-      cancelPendingScrollFollow();
-      hasInitialScrolledRef.current = false;
-      isPinnedToBottomRef.current = true;
-      lastAutoScrolledHeightRef.current = 0;
-      lastAutoScrolledContentKeyRef.current = null;
-      userDraggingRef.current = false;
-      suppressAutoUnpinUntilRef.current = 0;
-    }
-  }, [activeSnapshot, cancelPendingScrollFollow]);
-
-  const applyNativeScrollToBottom = useCallback(() => {
-    const scrollView = scrollViewRef.current;
-    if (
-      !mountedRef.current ||
-      !scrollView ||
-      !activeSnapshotRef.current ||
-      !isPinnedToBottomRef.current ||
-      userDraggingRef.current
-    ) {
-      return;
-    }
-    suppressAutoUnpinUntilRef.current = now() + 400;
-    const contentHeight = scrollContentHeightRef.current;
-    const viewportHeight = scrollViewportHeightRef.current;
-    if (contentHeight > viewportHeight && viewportHeight > 0) {
-      scrollView.scrollTo?.({
-        y: Math.max(0, contentHeight - viewportHeight),
-        animated: false,
-      });
-    }
-    scrollView.scrollToEnd({ animated: false });
-  }, [now]);
-
-  const scrollToBottomNow = useCallback(
-    (contentHeight?: number) => {
-      if (
-        !scrollViewRef.current ||
-        !activeSnapshotRef.current ||
-        userDraggingRef.current
-      ) {
-        return;
-      }
-      hasInitialScrolledRef.current = true;
-      if (typeof contentHeight === 'number' && contentHeight > 0) {
-        scrollContentHeightRef.current = contentHeight;
-        lastAutoScrolledHeightRef.current = contentHeight;
-      }
-      lastAutoScrolledContentKeyRef.current = scrollContentKeyRef.current;
-      cancelPendingScrollFollow();
-      applyNativeScrollToBottom();
-      // Android Fabric + react-native-screens transitions can defer child layout
-      // by a few frames; retry briefly while still pinned and not dragging.
-      if (typeof requestAnimationFrame === 'function') {
-        scrollFollowRafRef.current = requestAnimationFrame(() => {
-          scrollFollowRafRef.current = null;
-          applyNativeScrollToBottom();
-        });
-      }
-      scrollFollowTimeoutsRef.current = [
-        setTimeout(() => {
-          applyNativeScrollToBottom();
-        }, 80),
-        setTimeout(() => {
-          applyNativeScrollToBottom();
-        }, 280),
-      ];
-    },
-    [applyNativeScrollToBottom, cancelPendingScrollFollow],
-  );
-
-  const updatePinnedStateFromMetrics = useCallback(
-    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
-      if (layoutMeasurement?.height && layoutMeasurement.height > 0) {
-        scrollViewportHeightRef.current = layoutMeasurement.height;
-      }
-      if (contentSize?.height && contentSize.height > 0) {
-        scrollContentHeightRef.current = contentSize.height;
-      }
-      isPinnedToBottomRef.current = isScrollNearBottom({
-        offsetY: contentOffset?.y ?? 0,
-        viewportHeight: scrollViewportHeightRef.current,
-        contentHeight: scrollContentHeightRef.current,
-      });
-    },
-    [],
-  );
-
-  const handleScrollBeginDrag = useCallback(() => {
-    userDraggingRef.current = true;
-    suppressAutoUnpinUntilRef.current = 0;
-    cancelPendingScrollFollow();
-  }, [cancelPendingScrollFollow]);
-
-  const handleScroll = useCallback(
-    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      if (!hasInitialScrolledRef.current) {
-        return;
-      }
-      if (userDraggingRef.current || now() >= suppressAutoUnpinUntilRef.current) {
-        updatePinnedStateFromMetrics(event);
-      }
-    },
-    [now, updatePinnedStateFromMetrics],
-  );
-
-  const handleScrollEnd = useCallback(
-    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      userDraggingRef.current = false;
-      updatePinnedStateFromMetrics(event);
-    },
-    [updatePinnedStateFromMetrics],
-  );
-
-  const handleScrollLayout = useCallback(
-    (event: LayoutChangeEvent) => {
-      const nextHeight = event.nativeEvent.layout.height;
-      const prevHeight = scrollViewportHeightRef.current;
-      scrollViewportHeightRef.current = nextHeight;
-      if (
-        nextHeight > 0 &&
-        activeSnapshotRef.current &&
-        isPinnedToBottomRef.current &&
-        !userDraggingRef.current &&
-        scrollContentHeightRef.current > nextHeight &&
-        (!hasInitialScrolledRef.current ||
-          prevHeight === 0 ||
-          Math.abs(nextHeight - prevHeight) > 8)
-      ) {
-        scrollToBottomNow(scrollContentHeightRef.current);
-      }
-    },
-    [scrollToBottomNow],
-  );
-
-  const handleScrollContentSizeChange = useCallback(
-    (_width: number, contentHeight: number) => {
-      scrollContentHeightRef.current = contentHeight;
-      if (!activeSnapshotRef.current || contentHeight <= 0) {
-        return;
-      }
-      if (!hasInitialScrolledRef.current) {
-        scrollToBottomNow(contentHeight);
-        return;
-      }
-      if (
-        isPinnedToBottomRef.current &&
-        (Math.abs(contentHeight - lastAutoScrolledHeightRef.current) > 2 ||
-          scrollContentKeyRef.current !== lastAutoScrolledContentKeyRef.current)
-      ) {
-        scrollToBottomNow(contentHeight);
-      }
-    },
-    [scrollToBottomNow],
-  );
+  const chatScroll = useBottomFollowScroll({
+    contentKey: scrollContentKey,
+    enabled: Boolean(activeSnapshot),
+    layoutDeltaThresholdPx: 8,
+    mountedRef,
+    now,
+  });
+  const outputInlineScroll = useBottomFollowScroll({
+    contentKey: outputInlineText,
+    enabled: outputInlineText !== null,
+    bottomThresholdPx: 24,
+    layoutDeltaThresholdPx: 4,
+    mountedRef,
+    now,
+  });
+  resetScrollFollowRef.current = () => {
+    chatScroll.reset();
+    outputInlineScroll.reset();
+  };
 
   const isStale = viewState.status === 'stale';
   const badgeStyle = badgeVisuals(viewState);
@@ -1098,28 +1216,45 @@ export function SessionChatScreen({
         ) : null}
       </View>
 
-      <ScrollView
-        ref={scrollViewRef}
-        style={styles.scroll}
-        contentContainerStyle={styles.scrollContent}
-        keyboardShouldPersistTaps="handled"
-        scrollEventThrottle={16}
-        onLayout={handleScrollLayout}
-        onContentSizeChange={handleScrollContentSizeChange}
-        onScrollBeginDrag={handleScrollBeginDrag}
-        onScroll={handleScroll}
-        onScrollEndDrag={handleScrollEnd}
-        onMomentumScrollEnd={handleScrollEnd}
-        testID="session-chat-scroll"
-        refreshControl={
-          <RefreshControl
-            refreshing={isManualRefreshing}
-            onRefresh={handleManualRefresh}
-            colors={['#a78bfa', '#34d399']}
-            progressBackgroundColor="#161b22"
-            tintColor="#a78bfa"
-          />
-        }>
+      <View style={styles.bodyWrap}>
+        {submission?.status === 'delivered' ? (
+          <View
+            pointerEvents="box-none"
+            style={styles.topDeliveredBannerWrap}
+            testID="session-chat-delivered-top-banner">
+            <SubmissionBanner
+              submission={submission}
+              retryAllowed={retryGate.allowed}
+              retryBlockedReason={retryGate.reason}
+              onRetry={handleRetrySubmission}
+              onDiscard={handleDiscardSubmission}
+              onOpenSettings={onOpenSettings}
+            />
+          </View>
+        ) : null}
+
+        <ScrollView
+          ref={chatScroll.scrollViewRef}
+          style={styles.scroll}
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          scrollEventThrottle={16}
+          onLayout={chatScroll.handleLayout}
+          onContentSizeChange={chatScroll.handleContentSizeChange}
+          onScrollBeginDrag={chatScroll.handleScrollBeginDrag}
+          onScroll={chatScroll.handleScroll}
+          onScrollEndDrag={chatScroll.handleScrollEnd}
+          onMomentumScrollEnd={chatScroll.handleScrollEnd}
+          testID="session-chat-scroll"
+          refreshControl={
+            <RefreshControl
+              refreshing={isManualRefreshing}
+              onRefresh={handleManualRefresh}
+              colors={['#a78bfa', '#34d399']}
+              progressBackgroundColor="#161b22"
+              tintColor="#a78bfa"
+            />
+          }>
         {viewState.status === 'not_configured' ? (
           <View style={styles.card} testID="session-chat-not-configured-card">
             <Text style={styles.cardHeading}>
@@ -1306,13 +1441,27 @@ export function SessionChatScreen({
                     key={group.key}
                     style={styles.turnGroup}
                     testID={`session-chat-turn-${group.key}`}>
-                    {group.segments.map(segment => {
+                    {group.segments.map((segment, index) => {
+                      const prevSegment =
+                        index > 0 ? group.segments[index - 1] : null;
+                      const prevSpeaker = prevSegment
+                        ? prevSegment.kind === 'user'
+                          ? 'user'
+                          : 'agent'
+                        : null;
+                      const currSpeaker =
+                        segment.kind === 'user' ? 'user' : 'agent';
+                      const speakerSwitch =
+                        prevSpeaker !== null && prevSpeaker !== currSpeaker;
+
                       if (segment.kind === 'user') {
                         return (
-                          <UserMessageBubble
+                          <ChatMessageBubble
                             key={segment.key}
                             item={segment.item}
+                            speaker="user"
                             formattedTime={segment.formattedTime}
+                            speakerSwitch={speakerSwitch}
                           />
                         );
                       }
@@ -1329,6 +1478,7 @@ export function SessionChatScreen({
                             formattedTime={segment.formattedTime}
                             expanded={isExpanded}
                             onToggle={handleToggleToolGroup}
+                            speakerSwitch={speakerSwitch}
                           />
                         );
                       }
@@ -1338,14 +1488,17 @@ export function SessionChatScreen({
                             key={segment.key}
                             item={segment.item}
                             formattedTime={segment.formattedTime}
+                            speakerSwitch={speakerSwitch}
                           />
                         );
                       }
                       return (
-                        <AgentMessageCard
+                        <ChatMessageBubble
                           key={segment.key}
                           item={segment.item}
+                          speaker="agent"
                           formattedTime={segment.formattedTime}
+                          speakerSwitch={speakerSwitch}
                         />
                       );
                     })}
@@ -1359,34 +1512,48 @@ export function SessionChatScreen({
               testID="session-chat-output-section">
               <View style={styles.outputHeader}>
                 <Text style={styles.outputTitle}>Terminal output</Text>
-                <View
-                  style={[
-                    styles.outputPill,
-                    !activeSnapshot.outputAvailable
-                      ? styles.outputPillUnavailable
-                      : isStale
-                        ? styles.outputPillStale
-                        : styles.outputPillLive,
-                  ]}>
+                <View style={styles.outputHeaderRight}>
                   <View
                     style={[
-                      styles.outputPillDot,
+                      styles.outputPill,
                       !activeSnapshot.outputAvailable
-                        ? styles.outputPillDotUnavailable
+                        ? styles.outputPillUnavailable
                         : isStale
-                          ? styles.outputPillDotStale
-                          : styles.outputPillDotLive,
-                    ]}
-                  />
-                  <Text
-                    style={styles.outputPillText}
-                    testID="session-chat-output-status">
-                    {!activeSnapshot.outputAvailable
-                      ? 'Unavailable'
-                      : isStale
-                        ? 'Cached · Not live'
-                        : 'Live · Tail (max 200 lines)'}
-                  </Text>
+                          ? styles.outputPillStale
+                          : styles.outputPillLive,
+                    ]}>
+                    <View
+                      style={[
+                        styles.outputPillDot,
+                        !activeSnapshot.outputAvailable
+                          ? styles.outputPillDotUnavailable
+                          : isStale
+                            ? styles.outputPillDotStale
+                            : styles.outputPillDotLive,
+                      ]}
+                    />
+                    <Text
+                      style={styles.outputPillText}
+                      testID="session-chat-output-status">
+                      {!activeSnapshot.outputAvailable
+                        ? 'Unavailable'
+                        : isStale
+                          ? 'Cached · Not live'
+                          : 'Live · Tail (max 200 lines)'}
+                    </Text>
+                  </View>
+                  {activeSnapshot.outputAvailable &&
+                  outputTail &&
+                  outputTail.totalLines > 0 ? (
+                    <Pressable
+                      testID="session-chat-output-expand-button"
+                      accessibilityRole="button"
+                      accessibilityLabel="Expand terminal output"
+                      style={styles.outputExpandHeaderButton}
+                      onPress={handleOpenOutputModal}>
+                      <Text style={styles.outputExpandHeaderText}>Expand</Text>
+                    </Pressable>
+                  ) : null}
                 </View>
               </View>
 
@@ -1403,44 +1570,45 @@ export function SessionChatScreen({
                 </Text>
               ) : outputTail ? (
                 <View style={styles.outputTerminalBox}>
-                  {outputTail.hiddenAboveCount > 0 || outputLinesExpanded ? (
-                    <Pressable
-                      testID="session-chat-output-toggle"
-                      accessibilityRole="button"
-                      style={styles.outputExpandButton}
-                      onPress={() => setOutputLinesExpanded(prev => !prev)}>
-                      <ChevronIcon
-                        direction={outputLinesExpanded ? 'up' : 'down'}
-                        color="#c4b5fd"
-                        size={7}
-                      />
-                      <Text style={styles.outputExpandText}>
-                        {outputLinesExpanded
-                          ? 'Hide earlier lines'
-                          : `Show earlier · ${outputTail.hiddenAboveCount} more ${
-                              outputTail.hiddenAboveCount === 1
-                                ? 'line'
-                                : 'lines'
-                            }`}
+                  <ScrollView
+                    ref={outputInlineScroll.scrollViewRef}
+                    nestedScrollEnabled
+                    style={styles.outputInlineVerticalScroll}
+                    contentContainerStyle={styles.outputInlineVerticalContent}
+                    showsVerticalScrollIndicator
+                    scrollEventThrottle={16}
+                    onLayout={outputInlineScroll.handleLayout}
+                    onContentSizeChange={outputInlineScroll.handleContentSizeChange}
+                    onScrollBeginDrag={outputInlineScroll.handleScrollBeginDrag}
+                    onScroll={outputInlineScroll.handleScroll}
+                    onScrollEndDrag={outputInlineScroll.handleScrollEnd}
+                    onMomentumScrollEnd={outputInlineScroll.handleScrollEnd}
+                    testID="session-chat-output-inline-vertical-scroll">
+                    <ScrollView
+                      horizontal
+                      nestedScrollEnabled
+                      showsHorizontalScrollIndicator
+                      contentContainerStyle={styles.outputHorizontalContent}
+                      testID="session-chat-output-inline-horizontal-scroll">
+                      <Text
+                        selectable
+                        style={styles.outputMonoText}
+                        testID="session-chat-output-text">
+                        {outputTail.visibleText}
                       </Text>
-                    </Pressable>
-                  ) : null}
-                  <Text
-                    selectable
-                    style={styles.outputMonoText}
-                    testID="session-chat-output-text">
-                    {outputTail.visibleText}
-                  </Text>
+                    </ScrollView>
+                  </ScrollView>
                 </View>
               ) : null}
             </View>
           </>
         ) : null}
-      </ScrollView>
+        </ScrollView>
+      </View>
 
       {activeSnapshot ? (
         <View style={styles.composerDock} testID="session-chat-composer">
-          {submission ? (
+          {submission && submission.status !== 'delivered' ? (
             <SubmissionBanner
               submission={submission}
               retryAllowed={retryGate.allowed}
@@ -1507,42 +1675,192 @@ export function SessionChatScreen({
           </View>
         </View>
       ) : null}
+
+      <Modal
+        visible={Boolean(activeSnapshot && outputModalOpen)}
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={handleCloseOutputModal}
+        testID="session-chat-output-modal">
+        <View
+          style={[
+            styles.outputModalRoot,
+            {
+              paddingTop: topInset,
+              paddingBottom: bottomInset,
+            },
+          ]}>
+          <View
+            style={styles.outputModalHeader}
+            testID="session-chat-output-modal-header">
+            <View style={styles.outputModalTitleCol}>
+              <Text style={styles.outputModalTitle} numberOfLines={1}>
+                Terminal output
+              </Text>
+              {activeSnapshot ? (
+                <Text style={styles.outputModalSubtitle} numberOfLines={1}>
+                  {!activeSnapshot.outputAvailable
+                    ? 'Unavailable'
+                    : isStale
+                      ? 'Cached · Not live'
+                      : `Live · ${outputTail?.totalLines ?? 0} lines`}
+                </Text>
+              ) : null}
+            </View>
+            <View style={styles.outputModalActions}>
+              <Pressable
+                testID="session-chat-output-wrap-toggle"
+                accessibilityRole="switch"
+                accessibilityLabel="Wrap terminal lines"
+                accessibilityState={{ checked: outputWrapEnabled }}
+                style={[
+                  styles.outputModalWrapButton,
+                  outputWrapEnabled && styles.outputModalWrapButtonActive,
+                ]}
+                onPress={handleToggleOutputWrap}>
+                <Text
+                  style={[
+                    styles.outputModalWrapText,
+                    outputWrapEnabled && styles.outputModalWrapTextActive,
+                  ]}>
+                  {outputWrapEnabled ? 'Wrap: On' : 'Wrap: Off'}
+                </Text>
+              </Pressable>
+              <Pressable
+                testID="session-chat-output-close-button"
+                accessibilityRole="button"
+                accessibilityLabel="Close terminal output"
+                style={styles.outputModalCloseButton}
+                onPress={handleCloseOutputModal}>
+                <Text style={styles.outputModalCloseText}>✕</Text>
+              </Pressable>
+            </View>
+          </View>
+
+          <View style={styles.outputModalBody}>
+            {!activeSnapshot?.outputAvailable ? (
+              <View style={styles.outputModalMessageWrap}>
+                <Text
+                  style={styles.outputUnavailableText}
+                  testID="session-chat-output-modal-unavailable">
+                  {activeSnapshot?.outputMessage ||
+                    'Current terminal output is unavailable.'}
+                </Text>
+              </View>
+            ) : outputTail && outputTail.totalLines === 0 ? (
+              <View style={styles.outputModalMessageWrap}>
+                <Text style={styles.outputEmptyText}>
+                  Terminal output is empty.
+                </Text>
+              </View>
+            ) : outputTail ? (
+              <ScrollView
+                style={styles.outputModalVerticalScroll}
+                contentContainerStyle={styles.outputModalVerticalContent}
+                showsVerticalScrollIndicator
+                testID="session-chat-output-modal-vertical-scroll">
+                {outputWrapEnabled ? (
+                  <Text
+                    selectable
+                    style={[styles.outputMonoText, styles.outputMonoTextWrapped]}
+                    testID="session-chat-output-modal-text">
+                    {outputTail.visibleText}
+                  </Text>
+                ) : (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator
+                    contentContainerStyle={styles.outputHorizontalContent}
+                    testID="session-chat-output-modal-horizontal-scroll">
+                    <Text
+                      selectable
+                      style={styles.outputMonoText}
+                      testID="session-chat-output-modal-text">
+                      {outputTail.visibleText}
+                    </Text>
+                  </ScrollView>
+                )}
+              </ScrollView>
+            ) : null}
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
 
-function UserMessageBubble({
+/**
+ * Shared intervention bubble for user and agent turns: equal full-width compact geometry
+ * with speaker color variants, compact top identity row above the bubble, and single bottom-right time.
+ */
+function ChatMessageBubble({
   item,
+  speaker,
   formattedTime,
+  speakerSwitch = false,
 }: {
   item: SessionHistoryItem;
+  speaker: 'user' | 'agent';
   formattedTime: string | null;
+  speakerSwitch?: boolean;
 }): React.JSX.Element {
+  const isUser = speaker === 'user';
+
   return (
-    <View style={styles.userRow} testID={`session-chat-item-${item.id}`}>
-      <View style={styles.userAvatar}>
-        <Text style={styles.userAvatarText}>YOU</Text>
+    <View
+      style={[styles.messageRow, speakerSwitch && styles.speakerSwitchSpacing]}
+      testID={`session-chat-item-${item.id}`}>
+      <View
+        style={[
+          styles.messageIdentityRow,
+          isUser ? styles.userIdentityRow : styles.agentIdentityRow,
+        ]}
+        testID={`session-chat-identity-${item.id}`}>
+        {isUser ? (
+          <View style={styles.userIdentityBadge}>
+            <Text style={styles.userIdentityText}>YOU</Text>
+          </View>
+        ) : (
+          <View
+            accessibilityLabel="Agent"
+            style={styles.agentIdentityBadge}>
+            <SpawneaMarkIcon color="#c4b5fd" size={13} />
+          </View>
+        )}
       </View>
-      <View style={styles.userBubble}>
-        <Text selectable style={styles.userText}>
+
+      <View
+        style={[
+          styles.messageBubble,
+          isUser ? styles.userBubbleVariant : styles.agentBubbleVariant,
+        ]}
+        testID={`session-chat-bubble-${item.id}`}>
+        <Text
+          selectable
+          style={[
+            styles.messageText,
+            isUser ? styles.userTextVariant : styles.agentTextVariant,
+          ]}>
           {item.text}
         </Text>
-        <View style={styles.itemFooterRow}>
-          {item.textTruncated ? (
-            <View
-              style={styles.truncatedBadge}
-              testID={`session-chat-item-truncated-${item.id}`}>
-              <Text style={styles.truncatedBadgeText}>Truncated by server</Text>
-            </View>
-          ) : null}
-          {formattedTime ? (
-            <Text
-              style={styles.itemTimestampText}
-              testID={`session-chat-item-time-${item.id}`}>
-              {formattedTime}
-            </Text>
-          ) : null}
-        </View>
+        {item.textTruncated || formattedTime ? (
+          <View style={styles.itemFooterRow}>
+            {item.textTruncated ? (
+              <View
+                style={styles.truncatedBadge}
+                testID={`session-chat-item-truncated-${item.id}`}>
+                <Text style={styles.truncatedBadgeText}>Truncated by server</Text>
+              </View>
+            ) : null}
+            {formattedTime ? (
+              <Text
+                style={styles.itemTimestampText}
+                testID={`session-chat-item-time-${item.id}`}>
+                {formattedTime}
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
       </View>
     </View>
   );
@@ -1551,13 +1869,18 @@ function UserMessageBubble({
 function ScreenSnapshotCard({
   item,
   formattedTime,
+  speakerSwitch = false,
 }: {
   item: SessionHistoryItem;
   formattedTime: string | null;
+  speakerSwitch?: boolean;
 }): React.JSX.Element {
   return (
     <View
-      style={styles.screenSnapshotCard}
+      style={[
+        styles.screenSnapshotCard,
+        speakerSwitch && styles.speakerSwitchSpacing,
+      ]}
       testID={`session-chat-item-${item.id}`}>
       <View
         style={styles.screenSnapshotHeader}
@@ -1585,44 +1908,6 @@ function ScreenSnapshotCard({
   );
 }
 
-function AgentMessageCard({
-  item,
-  formattedTime,
-}: {
-  item: SessionHistoryItem;
-  formattedTime: string | null;
-}): React.JSX.Element {
-  return (
-    <View style={styles.agentRow} testID={`session-chat-item-${item.id}`}>
-      <View style={styles.agentAvatar}>
-        <SpawneaMarkIcon color="#c4b5fd" size={14} />
-      </View>
-      <View style={styles.agentCard}>
-        <View style={styles.agentCardHeader}>
-          <Text style={styles.agentLabel}>Agent</Text>
-          {formattedTime ? (
-            <Text
-              style={styles.itemTimestampText}
-              testID={`session-chat-item-time-${item.id}`}>
-              {formattedTime}
-            </Text>
-          ) : null}
-        </View>
-        <Text selectable style={styles.agentText}>
-          {item.text}
-        </Text>
-        {item.textTruncated ? (
-          <View
-            style={styles.truncatedBadge}
-            testID={`session-chat-item-truncated-${item.id}`}>
-            <Text style={styles.truncatedBadgeText}>Truncated by server</Text>
-          </View>
-        ) : null}
-      </View>
-    </View>
-  );
-}
-
 function ToolActivityCard({
   groupKey,
   items,
@@ -1630,6 +1915,7 @@ function ToolActivityCard({
   formattedTime,
   expanded,
   onToggle,
+  speakerSwitch = false,
 }: {
   groupKey: string;
   items: SessionHistoryItem[];
@@ -1637,12 +1923,15 @@ function ToolActivityCard({
   formattedTime: string | null;
   expanded: boolean;
   onToggle: (key: string) => void;
+  speakerSwitch?: boolean;
 }): React.JSX.Element {
   const countLabel =
     items.length === 1 ? '1 tool step' : `${items.length} tool steps`;
 
   return (
-    <View style={styles.toolWrapper} testID={`session-chat-tool-group-${groupKey}`}>
+    <View
+      style={[styles.toolWrapper, speakerSwitch && styles.speakerSwitchSpacing]}
+      testID={`session-chat-tool-group-${groupKey}`}>
       <Pressable
         testID={`session-chat-tool-toggle-${groupKey}`}
         accessibilityRole="button"
@@ -1917,6 +2206,17 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#c9d1d9',
   },
+  bodyWrap: {
+    flex: 1,
+    position: 'relative',
+  },
+  topDeliveredBannerWrap: {
+    position: 'absolute',
+    top: 8,
+    left: 12,
+    right: 12,
+    zIndex: 20,
+  },
   scroll: {
     flex: 1,
     backgroundColor: '#0d1117',
@@ -2026,88 +2326,82 @@ const styles = StyleSheet.create({
     color: '#ffffff',
   },
   turnsContainer: {
-    gap: 14,
+    gap: 20,
   },
   turnGroup: {
     gap: 8,
   },
-  userRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 8,
-    paddingLeft: 14,
+  speakerSwitchSpacing: {
+    marginTop: 10,
   },
-  userAvatar: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+  messageRow: {
+    width: '100%',
+    flexDirection: 'column',
+    gap: 4,
+  },
+  messageIdentityRow: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  userIdentityRow: {
+    justifyContent: 'flex-end',
+  },
+  agentIdentityRow: {
+    justifyContent: 'flex-start',
+  },
+  userIdentityBadge: {
+    height: 20,
+    minWidth: 32,
+    borderRadius: 10,
     backgroundColor: '#1e1b4b',
     borderWidth: 1,
     borderColor: '#4338ca',
+    paddingHorizontal: 7,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 2,
   },
-  userAvatarText: {
-    fontSize: 9,
+  userIdentityText: {
+    fontSize: 8,
     fontWeight: '800',
     color: '#c7d2fe',
+    letterSpacing: 0.4,
   },
-  userBubble: {
-    flex: 1,
-    backgroundColor: '#1a1f36',
-    borderWidth: 1,
-    borderColor: '#3730a3',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    gap: 6,
-  },
-  userText: {
-    fontSize: 14,
-    lineHeight: 20,
-    color: '#eef2ff',
-  },
-  agentRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 8,
-  },
-  agentAvatar: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+  agentIdentityBadge: {
+    height: 20,
+    minWidth: 26,
+    borderRadius: 10,
     backgroundColor: '#161b22',
     borderWidth: 1,
     borderColor: '#4c1d95',
+    paddingHorizontal: 6,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 2,
   },
-  agentCard: {
-    flex: 1,
-    backgroundColor: '#161b22',
+  messageBubble: {
+    width: '100%',
     borderWidth: 1,
-    borderColor: '#30363d',
     borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    gap: 4,
   },
-  agentCardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
+  userBubbleVariant: {
+    backgroundColor: '#1a1f36',
+    borderColor: '#3730a3',
   },
-  agentLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#c4b5fd',
+  agentBubbleVariant: {
+    backgroundColor: '#161b22',
+    borderColor: '#30363d',
   },
-  agentText: {
+  messageText: {
     fontSize: 14,
     lineHeight: 20,
+  },
+  userTextVariant: {
+    color: '#eef2ff',
+  },
+  agentTextVariant: {
     color: '#e6edf3',
   },
   screenSnapshotCard: {
@@ -2148,6 +2442,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   itemTimestampText: {
+    marginLeft: 'auto',
     fontSize: 11,
     color: '#8b949e',
   },
@@ -2166,7 +2461,8 @@ const styles = StyleSheet.create({
     color: '#fde68a',
   },
   toolWrapper: {
-    marginLeft: 36,
+    marginLeft: 34,
+    marginRight: 32,
     backgroundColor: '#11161d',
     borderWidth: 1,
     borderColor: '#21262d',
@@ -2222,15 +2518,21 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#30363d',
     borderRadius: 12,
-    padding: 12,
-    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 6,
   },
   outputHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     flexWrap: 'wrap',
-    gap: 8,
+    gap: 6,
+  },
+  outputHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   outputTitle: {
     fontSize: 13,
@@ -2277,6 +2579,19 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#e6edf3',
   },
+  outputExpandHeaderButton: {
+    backgroundColor: '#21262d',
+    borderWidth: 1,
+    borderColor: '#30363d',
+    borderRadius: 7,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+  },
+  outputExpandHeaderText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#c4b5fd',
+  },
   outputUnavailableText: {
     fontSize: 12,
     lineHeight: 17,
@@ -2291,28 +2606,113 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#21262d',
     borderRadius: 8,
-    padding: 10,
-    gap: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
   },
-  outputExpandButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 5,
-    borderBottomWidth: 1,
-    borderBottomColor: '#21262d',
+  outputInlineVerticalScroll: {
+    maxHeight: 176,
   },
-  outputExpandText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#c4b5fd',
+  outputInlineVerticalContent: {
+    paddingBottom: 2,
+  },
+  outputHorizontalContent: {
+    minWidth: '100%',
   },
   outputMonoText: {
-    fontFamily: 'monospace',
+    fontFamily: Platform.select({
+      ios: 'Menlo',
+      android: 'monospace',
+      default: 'monospace',
+    }),
     fontSize: 11,
     lineHeight: 16,
     color: '#d1d5db',
+  },
+  outputMonoTextWrapped: {
+    flexShrink: 1,
+    width: '100%',
+  },
+  outputModalRoot: {
+    flex: 1,
+    backgroundColor: '#0d1117',
+  },
+  outputModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#21262d',
+    backgroundColor: '#161b22',
+  },
+  outputModalTitleCol: {
+    flex: 1,
+    gap: 2,
+  },
+  outputModalTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#f0f6fc',
+  },
+  outputModalSubtitle: {
+    fontSize: 11,
+    color: '#8b949e',
+  },
+  outputModalActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  outputModalWrapButton: {
+    backgroundColor: '#21262d',
+    borderWidth: 1,
+    borderColor: '#30363d',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  outputModalWrapButtonActive: {
+    backgroundColor: '#2e1065',
+    borderColor: '#7c3aed',
+  },
+  outputModalWrapText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#c9d1d9',
+  },
+  outputModalWrapTextActive: {
+    color: '#ede9fe',
+  },
+  outputModalCloseButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 8,
+    backgroundColor: '#21262d',
+    borderWidth: 1,
+    borderColor: '#30363d',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  outputModalCloseText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#f0f6fc',
+  },
+  outputModalBody: {
+    flex: 1,
+    backgroundColor: '#090d13',
+  },
+  outputModalMessageWrap: {
+    padding: 16,
+  },
+  outputModalVerticalScroll: {
+    flex: 1,
+  },
+  outputModalVerticalContent: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
   },
   composerDock: {
     borderTopWidth: 1,
@@ -2334,7 +2734,7 @@ const styles = StyleSheet.create({
     borderColor: '#4c1d95',
   },
   subBannerDelivered: {
-    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    backgroundColor: '#0e2820',
     borderColor: '#059669',
   },
   subBannerUnknown: {

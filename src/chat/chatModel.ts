@@ -18,6 +18,7 @@ export const MAX_CHAT_DRAFT_CHARS = 32000;
 export const DEFAULT_CHAT_HISTORY_LIMIT = 20;
 export const DEFAULT_CHAT_OUTPUT_LINES = 200;
 export const DEFAULT_OUTPUT_PREVIEW_LINES = 12;
+export const DELIVERED_BANNER_DURATION_MS = 3000;
 
 export const UNKNOWN_RETRY_GUIDANCE =
   'No automatic resend was performed. Retrying reuses the same request ID, which is deduplicated only while the desktop app stays running; a desktop restart loses that protection, so check the conversation before retrying or discarding.';

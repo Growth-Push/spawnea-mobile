@@ -22,6 +22,7 @@ import type {
 import {
   applyHistoryFetchResult,
   createClientRequestId,
+  DELIVERED_BANNER_DURATION_MS,
   evaluateRetryGate,
   evaluateSendGate,
   formatItemTimestamp,
@@ -590,8 +591,8 @@ describe('SessionChatScreen contract & failure mode fixtures', () => {
       expect(textBefore).toContain('Tool activity · 1 tool step');
       expect(textBefore).toContain('Truncated');
       expect(textBefore).not.toContain('read_file output body');
-      expect(textBefore).toContain('Show earlier · 3 more lines');
-      expect(textBefore).not.toContain('out-1\n');
+      expect(textBefore).not.toContain('Show earlier');
+      expect(textBefore).toContain('out-1');
       expect(textBefore).not.toContain('sess-fixture-codex-1');
 
       const toolToggle = renderer.root.findByProps({
@@ -602,13 +603,21 @@ describe('SessionChatScreen contract & failure mode fixtures', () => {
       });
       expect(getAllText(renderer)).toContain('read_file output body');
 
-      const outputToggle = renderer.root.findByProps({
-        testID: 'session-chat-output-toggle',
+      const expandButton = renderer.root.findByProps({
+        testID: 'session-chat-output-expand-button',
       });
       await ReactTestRenderer.act(async () => {
-        outputToggle.props.onPress();
+        expandButton.props.onPress();
       });
-      expect(getAllText(renderer)).toContain('out-1');
+      const outputModal = renderer.root.findByProps({
+        testID: 'session-chat-output-modal',
+      });
+      expect(outputModal.props.visible).toBe(true);
+      expect(
+        renderer.root.findByProps({
+          testID: 'session-chat-output-modal-text',
+        }).props.children,
+      ).toContain('out-1');
     } finally {
       await ReactTestRenderer.act(async () => {
         renderer.unmount();
@@ -4916,6 +4925,688 @@ describe('Single-cycle recent-window sync (S1, J72-4) & P1 unresolved scoping', 
       expect(recovered).toContain('B1_FRESH_RECOVERED');
     } finally {
       jest.useRealTimers();
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+});
+
+describe('OPS-116 Session/Chat UX fixes', () => {
+  function findAllHostsByTestId(
+    root: ReactTestRenderer.ReactTestInstance,
+    testID: string,
+  ): ReactTestRenderer.ReactTestInstance[] {
+    return root.findAll(
+      node => typeof node.type === 'string' && node.props?.testID === testID,
+    );
+  }
+
+  test('(FIXTURE) Fix 1: delivered banner mounts at top, auto-dismisses at 3000ms, resets timer on successive deliveries, and cleans up on blur/unmount without affecting error banners', async () => {
+    jest.useFakeTimers();
+    const listeners: Record<'focus' | 'blur', Array<() => void>> = {
+      focus: [],
+      blur: [],
+    };
+    const navigation = {
+      isFocused: jest.fn(() => true),
+      addListener: jest.fn((event: 'focus' | 'blur', cb: () => void) => {
+        listeners[event].push(cb);
+        return () => {
+          listeners[event] = listeners[event].filter(item => item !== cb);
+        };
+      }),
+    };
+
+    let failNextPost = false;
+    const request = makeChatTransport({
+      session: makeSessionFixture({
+        id: 'sess-fixture-codex-1',
+        name: 'Ops 116 Top Banner Test',
+        status: 'idle',
+      }),
+      historyHandler: () => ({
+        status: 200,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessionId: 'sess-fixture-codex-1',
+          available: true,
+          source: 'transcript',
+          hasMore: false,
+          items: [],
+        } satisfies SessionHistoryResponse),
+      }),
+      messageHandler: async () => {
+        if (failNextPost) {
+          return {
+            status: 422,
+            retryAfter: null,
+            body: JSON.stringify({
+              errorCode: 'needs_human',
+              message: 'Requires approval',
+            }),
+          };
+        }
+        return {
+          status: 202,
+          retryAfter: null,
+          body: JSON.stringify({
+            apiVersion: 'v1',
+            sessionId: 'sess-fixture-codex-1',
+            delivered: true,
+            deliveryMethod: 'submit',
+            replayed: false,
+            status: 'delivered',
+          } satisfies SendMessageResponse),
+        };
+      },
+    });
+
+    const { renderer, cache } = await renderUnlockedChatScreen({
+      request,
+      navigation,
+    });
+
+    try {
+      expect(DELIVERED_BANNER_DURATION_MS).toBe(3000);
+
+      // 1. Send first message -> banner renders at top wrapper, NOT inside composerDock.
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-input' })
+          .props.onChangeText('First acceptance');
+      });
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-send-button' })
+          .props.onPress();
+        await flushAsync(8);
+      });
+
+      const topWrap = renderer.root.findByProps({
+        testID: 'session-chat-delivered-top-banner',
+      });
+      expect(
+        topWrap.findByProps({ testID: 'session-chat-submission-status' }).props
+          .children,
+      ).toBe('Delivered');
+      expect(
+        topWrap.findByProps({ testID: 'session-chat-submission-message' }).props
+          .children,
+      ).toContain('Delivery confirms acceptance, not turn completion.');
+
+      const composerDock = renderer.root.findByProps({
+        testID: 'session-chat-composer',
+      });
+      expect(
+        composerDock.findAllByProps({ testID: 'session-chat-submission-banner' }),
+      ).toHaveLength(0);
+
+      // 2. Advance 2000ms (still visible), then send a second message (must restart a fresh 3000ms timer).
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(2000);
+      });
+      expect(
+        findAllHostsByTestId(renderer.root, 'session-chat-delivered-top-banner'),
+      ).toHaveLength(1);
+
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-input' })
+          .props.onChangeText('Second acceptance');
+      });
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-send-button' })
+          .props.onPress();
+        await flushAsync(8);
+      });
+
+      // Advancing 1500ms more (total 3500ms since first, 1500ms since second) MUST still keep 2nd banner visible.
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(1500);
+      });
+      expect(
+        findAllHostsByTestId(renderer.root, 'session-chat-delivered-top-banner'),
+      ).toHaveLength(1);
+
+      // Typing while delivered does NOT prematurely wipe banner before 3000ms elapses.
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-input' })
+          .props.onChangeText('Typing next prompt');
+      });
+      expect(
+        findAllHostsByTestId(renderer.root, 'session-chat-delivered-top-banner'),
+      ).toHaveLength(1);
+
+      // Advancing past 3000ms from second delivery dismisses the banner automatically.
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(1600);
+      });
+      expect(
+        findAllHostsByTestId(renderer.root, 'session-chat-delivered-top-banner'),
+      ).toHaveLength(0);
+
+      // 3. Blurring screen while a delivered banner is active clears it & its timer cleanly.
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-send-button' })
+          .props.onPress();
+        await flushAsync(8);
+      });
+      expect(
+        findAllHostsByTestId(renderer.root, 'session-chat-delivered-top-banner'),
+      ).toHaveLength(1);
+
+      await ReactTestRenderer.act(async () => {
+        for (const cb of listeners.blur) {
+          cb();
+        }
+        await flushAsync(4);
+      });
+      expect(
+        findAllHostsByTestId(renderer.root, 'session-chat-delivered-top-banner'),
+      ).toHaveLength(0);
+
+      await ReactTestRenderer.act(async () => {
+        for (const cb of listeners.focus) {
+          cb();
+        }
+        await flushAsync(4);
+      });
+
+      // 4. Failed submission still mounts persistently inside composerDock and survives > 5s.
+      failNextPost = true;
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-input' })
+          .props.onChangeText('Will fail');
+      });
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-send-button' })
+          .props.onPress();
+        await flushAsync(8);
+      });
+      await ReactTestRenderer.act(async () => {
+        jest.advanceTimersByTime(5000);
+      });
+      expect(
+        renderer.root.findAllByProps({
+          testID: 'session-chat-delivered-top-banner',
+        }),
+      ).toHaveLength(0);
+      expect(
+        renderer.root
+          .findByProps({ testID: 'session-chat-composer' })
+          .findByProps({ testID: 'session-chat-submission-status' }).props
+          .children,
+      ).toBe('Delivery failed');
+    } finally {
+      jest.useRealTimers();
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('(FIXTURE) Fix 2: compact inline V/H terminal scroll, fullscreen modal with Wrap toggle + fixed X header, and Back closes without losing chat scroll position', async () => {
+    const longLine = 'wide-output-line-' + '0123456789abcdef'.repeat(10);
+    const request = makeChatTransport({
+      session: makeSessionFixture({
+        id: 'sess-fixture-codex-1',
+        name: 'Ops 116 Terminal Modal Test',
+        status: 'idle',
+      }),
+      outputHandler: () => ({
+        status: 200,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessionId: 'sess-fixture-codex-1',
+          available: true,
+          status: 'live',
+          output: `  indented line 1\n${longLine}\n    indented line 3`,
+        }),
+      }),
+      historyHandler: () => ({
+        status: 200,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessionId: 'sess-fixture-codex-1',
+          available: true,
+          source: 'transcript',
+          hasMore: false,
+          items: [
+            {
+              id: 'u1',
+              role: 'user',
+              source: 'transcript',
+              text: 'Run build and inspect long line',
+              turnId: 'turn-1',
+              turnBoundary: 'start',
+            },
+            {
+              id: 'a1',
+              role: 'agent',
+              source: 'transcript',
+              text: 'Finished build.',
+              turnId: 'turn-1',
+            },
+          ],
+        } satisfies SessionHistoryResponse),
+      }),
+    });
+
+    const { renderer, cache } = await renderUnlockedChatScreen({ request });
+
+    try {
+      // Inline box supports vertical + horizontal ScrollView without pressing expand, preserving leading spaces.
+      const inlineVertical = renderer.root.findByProps({
+        testID: 'session-chat-output-inline-vertical-scroll',
+      });
+      const inlineHorizontal = renderer.root.findByProps({
+        testID: 'session-chat-output-inline-horizontal-scroll',
+      });
+      expect(inlineVertical.props.nestedScrollEnabled).toBe(true);
+      expect(inlineHorizontal.props.horizontal).toBe(true);
+      expect(inlineHorizontal.props.nestedScrollEnabled).toBe(true);
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-output-text' }).props
+          .children,
+      ).toContain('  indented line 1');
+
+      // Record chat scroll state: simulate user scrolled away from bottom before opening modal.
+      const mainScroll = renderer.root.findAllByType(ScrollView)[0];
+      const scrollToSpy = jest.fn();
+      mainScroll.instance = { scrollTo: scrollToSpy };
+      await ReactTestRenderer.act(async () => {
+        mainScroll.props.onScroll?.({
+          nativeEvent: {
+            contentOffset: { x: 0, y: 120 },
+            layoutMeasurement: { width: 380, height: 420 },
+            contentSize: { width: 380, height: 1400 },
+          },
+        });
+      });
+      scrollToSpy.mockClear();
+
+      // Open fullscreen modal -> defaults to Wrap: Off with fixed header + horizontal ScrollView.
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-output-expand-button' })
+          .props.onPress();
+      });
+
+      const modal = renderer.root.findByProps({
+        testID: 'session-chat-output-modal',
+      });
+      expect(modal.props.visible).toBe(true);
+      expect(
+        modal.findByProps({ testID: 'session-chat-output-modal-header' }),
+      ).toBeDefined();
+      const wrapToggle = modal.findByProps({
+        testID: 'session-chat-output-wrap-toggle',
+      });
+      expect(wrapToggle.props.accessibilityState).toEqual({ checked: false });
+      expect(
+        modal.findAllByProps({
+          testID: 'session-chat-output-modal-horizontal-scroll',
+        }).length,
+      ).toBeGreaterThan(0);
+
+      // Toggle Wrap ON -> horizontal ScrollView removed, text wraps within viewport.
+      await ReactTestRenderer.act(async () => {
+        wrapToggle.props.onPress();
+      });
+      expect(
+        modal.findByProps({ testID: 'session-chat-output-wrap-toggle' }).props
+          .accessibilityState,
+      ).toEqual({ checked: true });
+      expect(
+        modal.findAllByProps({
+          testID: 'session-chat-output-modal-horizontal-scroll',
+        }),
+      ).toHaveLength(0);
+
+      // Android hardware Back (onRequestClose) closes modal without jumping chat scroll position.
+      await ReactTestRenderer.act(async () => {
+        modal.props.onRequestClose();
+      });
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-output-modal' }).props
+          .visible,
+      ).toBe(false);
+      expect(scrollToSpy).not.toHaveBeenCalled();
+
+      // Re-open and close via X button; wrap state persists or remains accessible, and closing resets visibility.
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-output-expand-button' })
+          .props.onPress();
+      });
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-output-modal' }).props
+          .visible,
+      ).toBe(true);
+      await ReactTestRenderer.act(async () => {
+        renderer.root
+          .findByProps({ testID: 'session-chat-output-close-button' })
+          .props.onPress();
+      });
+      expect(
+        renderer.root.findByProps({ testID: 'session-chat-output-modal' }).props
+          .visible,
+      ).toBe(false);
+    } finally {
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('(FIXTURE) F1 inline terminal starts at tail, follows pinned updates even at identical height, and preserves manual V/H scroll when unpinned', async () => {
+    const scrollToSpy = jest
+      .spyOn(ScrollView.prototype, 'scrollTo')
+      .mockImplementation(() => undefined);
+    const scrollToEndSpy = jest
+      .spyOn(ScrollView.prototype, 'scrollToEnd')
+      .mockImplementation(() => undefined);
+
+    let outputLines = Array.from({ length: 30 }, (_, i) =>
+      `[line ${String(i + 1).padStart(2, '0')}] initial terminal payload row`,
+    );
+
+    const request = makeChatTransport({
+      session: makeSessionFixture({
+        id: 'sess-fixture-codex-1',
+        name: 'Ops 116 Inline Tail Test',
+        status: 'idle',
+      }),
+      outputHandler: () => ({
+        status: 200,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessionId: 'sess-fixture-codex-1',
+          available: true,
+          status: 'live',
+          output: outputLines.join('\n'),
+        }),
+      }),
+      historyHandler: () => ({
+        status: 200,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessionId: 'sess-fixture-codex-1',
+          available: true,
+          source: 'transcript',
+          hasMore: false,
+          items: [],
+        } satisfies SessionHistoryResponse),
+      }),
+    });
+
+    const { renderer, cache } = await renderUnlockedChatScreen({ request });
+
+    try {
+      const inlineVertical = renderer.root.findByProps({
+        testID: 'session-chat-output-inline-vertical-scroll',
+      });
+      const inlineHorizontalBefore = renderer.root.findByProps({
+        testID: 'session-chat-output-inline-horizontal-scroll',
+      });
+
+      // 1) Initial layout + content measurement lands on bottom tail.
+      await ReactTestRenderer.act(async () => {
+        inlineVertical.props.onLayout({
+          nativeEvent: { layout: { height: 176, width: 320 } },
+        });
+        inlineVertical.props.onContentSizeChange(320, 720);
+      });
+      expect(scrollToSpy).toHaveBeenCalledWith({
+        y: 720 - 176,
+        animated: false,
+      });
+      expect(scrollToEndSpy).toHaveBeenCalledWith({ animated: false });
+
+      await ReactTestRenderer.act(async () => {
+        await new Promise<void>(resolve => setTimeout(() => resolve(), 320));
+      });
+      scrollToSpy.mockClear();
+      scrollToEndSpy.mockClear();
+
+      // 2) Polling update with identical height & byte length (rolling window, NO onContentSizeChange):
+      // useEffect on contentKey must still follow tail while pinned.
+      outputLines = outputLines.slice(1).concat('[line 31] rolling payload row');
+      await ReactTestRenderer.act(async () => {
+        renderer.root.findByType(RefreshControl).props.onRefresh();
+        await flushAsync(14);
+      });
+      expect(scrollToEndSpy).toHaveBeenCalledWith({ animated: false });
+
+      await ReactTestRenderer.act(async () => {
+        await new Promise<void>(resolve => setTimeout(() => resolve(), 320));
+      });
+      scrollToSpy.mockClear();
+      scrollToEndSpy.mockClear();
+
+      // 3) User manually scrolls up (unpinned): subsequent updates (even height growth) must NOT force scroll.
+      await ReactTestRenderer.act(async () => {
+        inlineVertical.props.onScrollBeginDrag();
+        inlineVertical.props.onScroll({
+          nativeEvent: {
+            contentOffset: { x: 0, y: 40 },
+            layoutMeasurement: { height: 176, width: 320 },
+            contentSize: { height: 720, width: 320 },
+          },
+        });
+        inlineVertical.props.onScrollEndDrag({
+          nativeEvent: {
+            contentOffset: { x: 0, y: 40 },
+            layoutMeasurement: { height: 176, width: 320 },
+            contentSize: { height: 720, width: 320 },
+          },
+        });
+      });
+
+      outputLines = outputLines.concat(
+        '[line 32] appended line while reading history',
+        '[line 33] another appended line',
+      );
+      await ReactTestRenderer.act(async () => {
+        renderer.root.findByType(RefreshControl).props.onRefresh();
+        await flushAsync(14);
+        inlineVertical.props.onContentSizeChange(320, 770);
+      });
+      expect(scrollToSpy).not.toHaveBeenCalled();
+      expect(scrollToEndSpy).not.toHaveBeenCalled();
+      // Horizontal ScrollView instance remains intact across updates (preserving horizontal scroll X).
+      expect(
+        renderer.root.findByProps({
+          testID: 'session-chat-output-inline-horizontal-scroll',
+        }).type,
+      ).toBe(inlineHorizontalBefore.type);
+
+      // 4) User manually scrolls back to bottom -> future update resumes tail follow.
+      await ReactTestRenderer.act(async () => {
+        inlineVertical.props.onScrollBeginDrag();
+        inlineVertical.props.onScrollEndDrag({
+          nativeEvent: {
+            contentOffset: { x: 0, y: 770 - 176 },
+            layoutMeasurement: { height: 176, width: 320 },
+            contentSize: { height: 770, width: 320 },
+          },
+        });
+      });
+      outputLines = outputLines.slice(1).concat('[line 34] latest live output!!');
+      await ReactTestRenderer.act(async () => {
+        renderer.root.findByType(RefreshControl).props.onRefresh();
+        await flushAsync(14);
+      });
+      expect(scrollToEndSpy).toHaveBeenCalledWith({ animated: false });
+    } finally {
+      scrollToSpy.mockRestore();
+      scrollToEndSpy.mockRestore();
+      await ReactTestRenderer.act(async () => {
+        renderer.unmount();
+      });
+      cache.dispose();
+    }
+  });
+
+  test('(FIXTURE) Fix 3 / F2: shared full-width bubble geometry with compact top identity row, single bottom-right timestamp, and external spacing', async () => {
+    const request = makeChatTransport({
+      session: makeSessionFixture({
+        id: 'sess-fixture-codex-1',
+        name: 'Ops 116 Alignment Test',
+        status: 'idle',
+      }),
+      historyHandler: () => ({
+        status: 200,
+        body: JSON.stringify({
+          apiVersion: 'v1',
+          sessionId: 'sess-fixture-codex-1',
+          available: true,
+          source: 'transcript',
+          hasMore: false,
+          items: [
+            {
+              id: 'u-short',
+              role: 'user',
+              source: 'transcript',
+              text: 'Ok',
+              timestamp: '2026-11-15T15:00:00.000Z',
+              turnId: 'turn-1',
+              turnBoundary: 'start',
+            },
+            {
+              id: 'a-long',
+              role: 'agent',
+              source: 'transcript',
+              text: 'Detailed response spanning full available chat width with compact interior padding and clear external turn separation.',
+              timestamp: '2026-11-15T15:01:00.000Z',
+              turnId: 'turn-1',
+            },
+            {
+              id: 'a-short',
+              role: 'agent',
+              source: 'transcript',
+              text: 'Done.',
+              timestamp: '2026-11-15T15:02:00.000Z',
+              turnId: 'turn-2',
+            },
+          ],
+        } satisfies SessionHistoryResponse),
+      }),
+    });
+
+    const { renderer, cache } = await renderUnlockedChatScreen({ request });
+
+    try {
+      const userRow = findAllHostsByTestId(
+        renderer.root,
+        'session-chat-item-u-short',
+      )[0];
+      const userRowStyle = StyleSheet.flatten(userRow.props.style);
+      expect(userRowStyle.flexDirection).toBe('column');
+      expect(userRowStyle.width).toBe('100%');
+      expect(userRowStyle.paddingLeft).toBeUndefined();
+      expect(userRowStyle.paddingRight).toBeUndefined();
+
+      // Identity sits above the bubble: YOU on the right for user, icon badge on the left for agent.
+      const userIdentity = findAllHostsByTestId(
+        renderer.root,
+        'session-chat-identity-u-short',
+      )[0];
+      const userBubble = findAllHostsByTestId(
+        renderer.root,
+        'session-chat-bubble-u-short',
+      )[0];
+      expect(userRow.children).toHaveLength(2);
+      expect(
+        (userRow.children[0] as ReactTestRenderer.ReactTestInstance).props
+          .testID,
+      ).toBe('session-chat-identity-u-short');
+      expect(
+        (userRow.children[1] as ReactTestRenderer.ReactTestInstance).props
+          .testID,
+      ).toBe('session-chat-bubble-u-short');
+      expect(StyleSheet.flatten(userIdentity.props.style).justifyContent).toBe(
+        'flex-end',
+      );
+      expect(userIdentity.findAllByType(Text)[0].props.children).toBe('YOU');
+      expect(userBubble.findAllByType(Text).map(t => t.props.children)).not.toContain('YOU');
+
+      const agentRow = findAllHostsByTestId(
+        renderer.root,
+        'session-chat-item-a-long',
+      )[0];
+      const agentRowStyle = StyleSheet.flatten(agentRow.props.style);
+      expect(agentRowStyle.flexDirection).toBe('column');
+      expect(agentRowStyle.width).toBe('100%');
+      expect(agentRowStyle.marginTop).toBeGreaterThanOrEqual(10);
+
+      const agentIdentity = findAllHostsByTestId(
+        renderer.root,
+        'session-chat-identity-a-long',
+      )[0];
+      expect(agentRow.children).toHaveLength(2);
+      expect(
+        (agentRow.children[0] as ReactTestRenderer.ReactTestInstance).props
+          .testID,
+      ).toBe('session-chat-identity-a-long');
+      expect(
+        (agentRow.children[1] as ReactTestRenderer.ReactTestInstance).props
+          .testID,
+      ).toBe('session-chat-bubble-a-long');
+      expect(StyleSheet.flatten(agentIdentity.props.style).justifyContent).toBe(
+        'flex-start',
+      );
+      expect(agentIdentity.findByProps({ accessibilityLabel: 'Agent' })).toBeDefined();
+      expect(getAllText(renderer)).not.toContain('\nAgent\n');
+
+      // Short agent and user messages use identical full-width structure/padding with speaker color variants.
+      const shortAgentBubble = findAllHostsByTestId(
+        renderer.root,
+        'session-chat-bubble-a-short',
+      )[0];
+      const userBubbleStyle = StyleSheet.flatten(userBubble.props.style);
+      const shortAgentBubbleStyle = StyleSheet.flatten(
+        shortAgentBubble.props.style,
+      );
+      expect(userBubbleStyle.width).toBe('100%');
+      expect(shortAgentBubbleStyle.width).toBe('100%');
+      expect(userBubbleStyle.paddingHorizontal).toBe(
+        shortAgentBubbleStyle.paddingHorizontal,
+      );
+      expect(userBubbleStyle.paddingVertical).toBe(
+        shortAgentBubbleStyle.paddingVertical,
+      );
+      expect(userBubbleStyle.backgroundColor).not.toBe(
+        shortAgentBubbleStyle.backgroundColor,
+      );
+
+      // Each message renders its timestamp exactly once at bottom-right.
+      const userTimes = findAllHostsByTestId(
+        renderer.root,
+        'session-chat-item-time-u-short',
+      );
+      const agentTimes = findAllHostsByTestId(
+        renderer.root,
+        'session-chat-item-time-a-long',
+      );
+      expect(userTimes).toHaveLength(1);
+      expect(agentTimes).toHaveLength(1);
+      expect(StyleSheet.flatten(userTimes[0].props.style).marginLeft).toBe(
+        'auto',
+      );
+      expect(StyleSheet.flatten(agentTimes[0].props.style).marginLeft).toBe(
+        'auto',
+      );
+    } finally {
       await ReactTestRenderer.act(async () => {
         renderer.unmount();
       });
