@@ -508,7 +508,7 @@ function SessionMetadataRow({
         style={styles.metaItem}
         accessible
         accessibilityLabel={`Host: ${hostLabel}`}>
-        <HostIcon color="#8b949e" size={iconSize} />
+        <HostIcon color="#8b949e" size={iconSize} hostName={hostLabel} />
         <Text style={styles.metaText}>{hostLabel}</Text>
       </View>
 
@@ -516,7 +516,13 @@ function SessionMetadataRow({
         style={styles.metaItem}
         accessible
         accessibilityLabel={`Harness: ${harnessLabel}`}>
-        <HarnessIcon color="#a78bfa" size={iconSize} />
+        <HarnessIcon
+          color="#a78bfa"
+          size={iconSize}
+          harnessId={session.harness.id}
+          harnessName={session.harness.name}
+          harnessCommand={session.harness.command}
+        />
         <Text style={styles.metaText}>{harnessLabel}</Text>
       </View>
 

@@ -624,7 +624,7 @@ function SessionCard({
             style={styles.metaItem}
             accessible
             accessibilityLabel={`Host: ${hostLabel}`}>
-            <HostIcon color="#8b949e" size={12} />
+            <HostIcon color="#8b949e" size={12} hostName={hostLabel} />
             <Text style={styles.metaText}>{hostLabel}</Text>
           </View>
 
@@ -632,7 +632,13 @@ function SessionCard({
             style={styles.metaItem}
             accessible
             accessibilityLabel={`Harness: ${harnessLabel}`}>
-            <HarnessIcon color="#a78bfa" size={12} />
+            <HarnessIcon
+              color="#a78bfa"
+              size={12}
+              harnessId={session.harness.id}
+              harnessName={session.harness.name}
+              harnessCommand={session.harness.command}
+            />
             <Text style={styles.metaText}>{harnessLabel}</Text>
           </View>
 
@@ -740,14 +746,24 @@ function SessionCard({
                               style={styles.metaItem}
                               accessible
                               accessibilityLabel={`Host: ${childHost}`}>
-                              <HostIcon color="#8b949e" size={11} />
+                              <HostIcon
+                                color="#8b949e"
+                                size={11}
+                                hostName={childHost}
+                              />
                               <Text style={styles.metaText}>{childHost}</Text>
                             </View>
                             <View
                               style={styles.metaItem}
                               accessible
                               accessibilityLabel={`Harness: ${childHarness}`}>
-                              <HarnessIcon color="#a78bfa" size={11} />
+                              <HarnessIcon
+                                color="#a78bfa"
+                                size={11}
+                                harnessId={child.harness.id}
+                                harnessName={child.harness.name}
+                                harnessCommand={child.harness.command}
+                              />
                               <Text style={styles.metaText}>{childHarness}</Text>
                             </View>
                             {childBranch ? (

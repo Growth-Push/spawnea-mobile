@@ -3,6 +3,7 @@ package com.growthpush.spawneamobile
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
 import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
@@ -12,6 +13,7 @@ import com.swmansion.rnscreens.fragment.restoration.RNScreensFragmentFactory
 class MainActivity : ReactActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
+    installSplashScreen()
     supportFragmentManager.fragmentFactory = RNScreensFragmentFactory()
     super.onCreate(savedInstanceState)
     applyRecentsProtection(

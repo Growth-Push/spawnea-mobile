@@ -1,5 +1,5 @@
 import React from 'react';
-import { StatusBar, useColorScheme } from 'react-native';
+import { StatusBar } from 'react-native';
 import {
   initialWindowMetrics,
   SafeAreaProvider,
@@ -7,11 +7,9 @@ import {
 import { AppNavigator } from './src/navigation/AppNavigator';
 
 function App(): React.JSX.Element {
-  const isDarkMode = useColorScheme() === 'dark';
-
   return (
     <SafeAreaProvider initialMetrics={initialWindowMetrics}>
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
+      <StatusBar barStyle="light-content" />
       <AppNavigator />
     </SafeAreaProvider>
   );
