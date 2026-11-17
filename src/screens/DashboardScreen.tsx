@@ -32,6 +32,7 @@ import {
 import {
   computeDistributionSummary,
   DashboardDistributionCategory,
+  formatDistributionAccessibilityLabel,
   formatSessionStatusLabel,
   formatSessionTitle,
   partitionDashboardSessions,
@@ -95,6 +96,32 @@ function categoryVisuals(category: DashboardDistributionCategory): {
         dot: '#f87171',
       };
   }
+}
+
+/**
+ * Compact outlined badge for the number of child sessions. Square-ish outline and
+ * the key below the legend (not color alone) distinguish it from a notification.
+ */
+function ChildCountBadge({
+  count,
+  color,
+  testID,
+}: {
+  count: number | string;
+  color: string;
+  testID?: string;
+}): React.JSX.Element {
+  return (
+    <View
+      style={[styles.childBadge, { borderColor: color }]}
+      testID={testID}>
+      <Text
+        style={[styles.childBadgeText, { color }]}
+        numberOfLines={1}>
+        {count}
+      </Text>
+    </View>
+  );
 }
 
 export function DashboardScreen({
@@ -395,22 +422,27 @@ export function DashboardScreen({
                   const ratio =
                     summary.total > 0 ? item.count / summary.total : 0;
                   const widthPercent = ratio * 100;
-                  const countText = String(item.count);
+                  const parentText = String(item.parentCount);
+                  const childText = String(item.childCount);
+                  // Parent number + (when there are children) the outlined badge.
                   const minNeededWidthDp =
-                    countText.length * 9 * fontScale + 8;
+                    (parentText.length * 9 +
+                      (item.childCount > 0 ? childText.length * 7 + 14 : 0)) *
+                      fontScale +
+                    8;
                   const segmentWidthDp =
                     barUsableWidth !== null ? barUsableWidth * ratio : null;
                   const showSegmentCount =
                     segmentWidthDp !== null
                       ? segmentWidthDp >= minNeededWidthDp
-                      : ratio >= 0.1;
+                      : ratio >= 0.1 && item.childCount === 0;
 
                   return (
                     <View
                       key={item.category}
                       testID={`dashboard-bar-segment-${item.category}`}
                       accessible
-                      accessibilityLabel={`${item.count} ${item.label}`}
+                      accessibilityLabel={formatDistributionAccessibilityLabel(item)}
                       style={[
                         styles.distributionBarSegment,
                         {
@@ -419,14 +451,23 @@ export function DashboardScreen({
                         },
                       ]}>
                       {showSegmentCount ? (
-                        <Text
-                          style={[
-                            styles.distributionBarText,
-                            { color: visuals.barText },
-                          ]}
-                          numberOfLines={1}>
-                          {item.count}
-                        </Text>
+                        <View style={styles.segmentContent}>
+                          <Text
+                            style={[
+                              styles.distributionBarText,
+                              { color: visuals.barText },
+                            ]}
+                            numberOfLines={1}>
+                            {item.parentCount}
+                          </Text>
+                          {item.childCount > 0 ? (
+                            <ChildCountBadge
+                              count={item.childCount}
+                              color={visuals.barText}
+                              testID={`dashboard-bar-child-badge-${item.category}`}
+                            />
+                          ) : null}
+                        </View>
                       ) : null}
                     </View>
                   );
@@ -439,18 +480,48 @@ export function DashboardScreen({
               {summary.categories.map(item => {
                 const visuals = categoryVisuals(item.category);
                 return (
-                  <View key={item.category} style={styles.legendItem}>
+                  <View
+                    key={item.category}
+                    style={styles.legendItem}
+                    testID={`dashboard-legend-item-${item.category}`}
+                    accessible
+                    accessibilityLabel={formatDistributionAccessibilityLabel(
+                      item,
+                    )}>
                     <View
                       style={[styles.legendDot, { backgroundColor: visuals.dot }]}
                     />
                     <Text
+                      style={styles.legendNumber}
+                      testID={`dashboard-distribution-parents-${item.category}`}>
+                      {item.parentCount}
+                    </Text>
+                    {item.childCount > 0 ? (
+                      <ChildCountBadge
+                        count={item.childCount}
+                        color="#9ca3af"
+                        testID={`dashboard-distribution-children-${item.category}`}
+                      />
+                    ) : null}
+                    <Text
                       style={styles.legendText}
                       testID={`dashboard-legend-${item.category}`}>
-                      {item.count} {item.label}
+                      {item.label}
                     </Text>
                   </View>
                 );
               })}
+            </View>
+
+            <View
+              style={styles.distributionKey}
+              testID="dashboard-distribution-key"
+              accessible
+              accessibilityLabel="Key: the number is parent sessions; the outlined badge is child sessions">
+              <Text style={styles.distributionKeyText}>Number = parents</Text>
+              <Text style={styles.distributionKeyText}>·</Text>
+              <ChildCountBadge count="n" color="#9ca3af" />
+              <Text style={styles.distributionKeyText}>= children</Text>
             </View>
 
             {summary.unknownCount > 0 ? (
@@ -998,6 +1069,39 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 5,
     flexShrink: 1,
+  },
+  legendNumber: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#f0f6fc',
+  },
+  childBadge: {
+    borderWidth: 1,
+    borderRadius: 4,
+    paddingHorizontal: 4,
+    minWidth: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  childBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  segmentContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  distributionKey: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    columnGap: 6,
+    rowGap: 2,
+  },
+  distributionKeyText: {
+    fontSize: 11,
+    color: '#9ca3af',
   },
   legendDot: {
     width: 8,

@@ -27,7 +27,12 @@ export type DashboardDistributionCategory =
 export interface DistributionCategoryItem {
   category: DashboardDistributionCategory;
   label: string;
+  /** All sessions in the group (parents + children); drives the bar proportions. */
   count: number;
+  /** Root sessions: `parentSessionId` null, undefined, empty or whitespace. */
+  parentCount: number;
+  /** Child sessions: non-empty `parentSessionId`, resolved or not, with or without descendants. */
+  childCount: number;
 }
 
 export interface DashboardDistributionSummary {
@@ -129,17 +134,48 @@ export function mapSessionStatusToCategory(
 }
 
 /**
+ * A session is a child when it has a non-empty `parentSessionId`, even if that
+ * parent is not in the list and even if the session has descendants itself.
+ */
+export function isChildSession(session: SessionSummary): boolean {
+  const parentId = session.parentSessionId;
+  return typeof parentId === 'string' && parentId.trim() !== '';
+}
+
+function pluralizeSessions(count: number, kind: 'parent' | 'child'): string {
+  return `${count} ${kind} ${count === 1 ? 'session' : 'sessions'}`;
+}
+
+/**
+ * Full accessible label for a distribution group, e.g.
+ * "Running: 2 parent sessions, 3 child sessions". Always states both numbers.
+ */
+export function formatDistributionAccessibilityLabel(
+  item: Pick<DistributionCategoryItem, 'label' | 'parentCount' | 'childCount'>,
+): string {
+  return `${item.label}: ${pluralizeSessions(
+    item.parentCount,
+    'parent',
+  )}, ${pluralizeSessions(item.childCount, 'child')}`;
+}
+
+/**
  * Aggregates real API sessions into the four Dashboard summary categories plus
  * `unknownCount` for unrecognized statuses, with `total` equal to all sessions.
+ * Each session is counted once, by its own status, as a parent (root) or a child.
  */
 export function computeDistributionSummary(
   sessions: SessionSummary[],
 ): DashboardDistributionSummary {
-  const counts: Record<DashboardDistributionCategory, number> = {
-    'need-input': 0,
-    running: 0,
-    'done/idle': 0,
-    error: 0,
+  const emptyCounts = () => ({ parents: 0, children: 0 });
+  const counts: Record<
+    DashboardDistributionCategory,
+    { parents: number; children: number }
+  > = {
+    'need-input': emptyCounts(),
+    running: emptyCounts(),
+    'done/idle': emptyCounts(),
+    error: emptyCounts(),
   };
   let unknownCount = 0;
 
@@ -147,33 +183,28 @@ export function computeDistributionSummary(
     const category = mapSessionStatusToCategory(session.status);
     if (category === null) {
       unknownCount += 1;
+    } else if (isChildSession(session)) {
+      counts[category].children += 1;
     } else {
-      counts[category] += 1;
+      counts[category].parents += 1;
     }
   }
 
-  const categories: DistributionCategoryItem[] = [
-    {
-      category: 'need-input',
-      label: 'Need input',
-      count: counts['need-input'],
-    },
-    {
-      category: 'running',
-      label: 'Running',
-      count: counts.running,
-    },
-    {
-      category: 'done/idle',
-      label: 'Done/idle',
-      count: counts['done/idle'],
-    },
-    {
-      category: 'error',
-      label: 'Error',
-      count: counts.error,
-    },
+  const labels: Array<[DashboardDistributionCategory, string]> = [
+    ['need-input', 'Need input'],
+    ['running', 'Running'],
+    ['done/idle', 'Done/idle'],
+    ['error', 'Error'],
   ];
+  const categories: DistributionCategoryItem[] = labels.map(
+    ([category, label]) => ({
+      category,
+      label,
+      count: counts[category].parents + counts[category].children,
+      parentCount: counts[category].parents,
+      childCount: counts[category].children,
+    }),
+  );
 
   return {
     total: sessions.length,
