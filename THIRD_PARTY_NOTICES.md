@@ -58,3 +58,20 @@ Detection mirrors `OsIcon.tsx` (`detectOsType`) with whole-token matching (`Loca
 | Linux | `linux` | `#FCC624` | 8.89 | brand |
 | FreeBSD | `freebsd` | `#AB2B28` | 2.09 | monochrome |
 | Windows, Gentoo, Void, Kali, unknown | n/a | n/a | n/a | **Generic monitor glyph**: no approved verified source |
+
+## Session status glyphs (`src/dashboard/StatusGlyphs.tsx`)
+
+The seven status glyphs reproduce the canonical mapping of Spawnea Desktop's `StatusBadge.tsx` (verified against its code, which matches its comments): starting → Loader2, working → Radio, needs_input → MessageSquare, done → CheckCircle2, error → AlertCircle, disconnected → Unplug, idle → Clock. The geometries are copied (not a dependency) from **`lucide-react@1.70.0`, license ISC** (© Lucide Icons and Contributors), and drawn with `react-native-svg` (24×24 viewBox, stroke, round caps and joins). Unknown statuses use an explicit fallback glyph, also from lucide.
+
+| Status | Glyph shown | lucide icon file (alias) |
+|---|---|---|
+| starting | Loader2 | `loader-circle` (`loader-2`) |
+| working | Radio | `radio` |
+| needs_input | MessageSquare | `message-square` |
+| done | CheckCircle2 | `circle-check` (`check-circle-2`) |
+| error | AlertCircle | `circle-exclamation-point` (`alert-circle`) |
+| disconnected | Unplug | `unplug` |
+| idle | Clock | `clock` |
+| unknown status | question-mark circle (fallback) | `circle-question-mark` |
+
+ISC License. Copyright (c) 2026 Lucide Icons and Contributors. Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies. THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS.

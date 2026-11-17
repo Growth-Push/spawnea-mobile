@@ -74,7 +74,7 @@ import {
   useSessionChatSync,
 } from '../hooks/useSessionChatSync';
 import {
-  formatHarnessName,
+  formatHarnessIdentity,
   formatHostName,
   formatProjectName,
 } from '../sessions/sessionsModel';
@@ -1147,7 +1147,10 @@ export function SessionChatScreen({
             {session ? (
               <View style={styles.headerMetaRow}>
                 <StatusChip status={session.status} />
-                <View style={styles.metaChip}>
+                <View
+                  style={styles.metaChip}
+                  accessible
+                  accessibilityLabel={formatHarnessIdentity(session).accessibilityLabel}>
                   <HarnessIcon
                     color="#a78bfa"
                     size={11}
@@ -1155,8 +1158,8 @@ export function SessionChatScreen({
                     harnessName={session.harness.name}
                     harnessCommand={session.harness.command}
                   />
-                  <Text style={styles.metaText}>
-                    {formatHarnessName(session)}
+                  <Text style={styles.metaText} numberOfLines={2}>
+                    {formatHarnessIdentity(session).label}
                   </Text>
                 </View>
                 <View style={styles.metaChip}>

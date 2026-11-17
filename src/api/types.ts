@@ -23,6 +23,8 @@ export interface SessionSummary {
   name: string;
   parentSessionId?: string | null;
   childAlias?: string | null;
+  /** Model requested when the session was created; not necessarily the effective one. */
+  requestedModel?: string | null;
   task: string;
   host: SessionHostRef;
   project: SessionProjectRef;

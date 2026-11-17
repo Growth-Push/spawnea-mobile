@@ -41,6 +41,7 @@ import {
   formatSessionTitle,
   partitionDashboardSessions,
 } from '../dashboard/dashboardModel';
+import { formatHarnessIdentity } from '../sessions/sessionsModel';
 import {
   badgeVisuals,
   connectionBadgeLabel,
@@ -784,10 +785,7 @@ function SessionCard({
   const trimmedTask = session.task.trim();
   const showTaskSubtitle = trimmedTask.length > 0 && trimmedTask !== title;
   const hostLabel = session.host.name.trim() || session.host.id;
-  const harnessLabel =
-    session.harness.name.trim() ||
-    session.harness.command.trim() ||
-    session.harness.id;
+  const harnessIdentity = formatHarnessIdentity(session);
   const branchLabel = session.worktree?.branch?.trim() || null;
 
   return (
@@ -830,7 +828,7 @@ function SessionCard({
           <View
             style={styles.metaItem}
             accessible
-            accessibilityLabel={`Harness: ${harnessLabel}`}>
+            accessibilityLabel={harnessIdentity.accessibilityLabel}>
             <HarnessIcon
               color="#a78bfa"
               size={12}
@@ -838,7 +836,9 @@ function SessionCard({
               harnessName={session.harness.name}
               harnessCommand={session.harness.command}
             />
-            <Text style={styles.metaText}>{harnessLabel}</Text>
+            <Text style={styles.metaText} numberOfLines={2}>
+              {harnessIdentity.label}
+            </Text>
           </View>
 
           {branchLabel ? (
@@ -914,10 +914,7 @@ function SessionCard({
                       const childTitle = formatSessionTitle(child);
                       const childHost =
                         child.host.name.trim() || child.host.id;
-                      const childHarness =
-                        child.harness.name.trim() ||
-                        child.harness.command.trim() ||
-                        child.harness.id;
+                      const childIdentity = formatHarnessIdentity(child);
                       const childBranch = child.worktree?.branch?.trim() || null;
                       return (
                         <Pressable
@@ -955,7 +952,7 @@ function SessionCard({
                             <View
                               style={styles.metaItem}
                               accessible
-                              accessibilityLabel={`Harness: ${childHarness}`}>
+                              accessibilityLabel={childIdentity.accessibilityLabel}>
                               <HarnessIcon
                                 color="#a78bfa"
                                 size={11}
@@ -963,7 +960,9 @@ function SessionCard({
                                 harnessName={child.harness.name}
                                 harnessCommand={child.harness.command}
                               />
-                              <Text style={styles.metaText}>{childHarness}</Text>
+                              <Text style={styles.metaText} numberOfLines={2}>
+                                {childIdentity.label}
+                              </Text>
                             </View>
                             {childBranch ? (
                               <View

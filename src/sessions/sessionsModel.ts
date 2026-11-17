@@ -332,4 +332,72 @@ export function formatHarnessName(session: SessionSummary): string {
   );
 }
 
+/**
+ * Explicit, tested mapping of known model IDs to readable names. Anything else is
+ * shown as its (already sanitized) ID: no commercial name is ever guessed.
+ */
+export const KNOWN_MODEL_LABELS: Readonly<Record<string, string>> = {
+  'claude-opus-5-5': 'Opus 5.5',
+  'claude-sonnet-5-5': 'Sonnet 5.5',
+  'claude-haiku-5-5': 'Haiku 5.5',
+  'claude-fable-5-2': 'Fable 5.2',
+};
+
+export function formatRequestedModelLabel(modelId: string): string {
+  return KNOWN_MODEL_LABELS[modelId.trim().toLowerCase()] ?? modelId;
+}
+
+function normalizeForCompare(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/**
+ * Harness API names often end with the host in parentheses ("Claude (Local · Arch)").
+ * The host is shown separately, so that repeated suffix is dropped; a different
+ * parenthetical is kept, and so is the full name if nothing would remain.
+ */
+export function stripRepeatedHost(harnessName: string, hostLabels: string[]): string {
+  const match = /^(.*?)\s*\(([^()]*)\)\s*$/.exec(harnessName);
+  if (!match || !match[1].trim()) {
+    return harnessName;
+  }
+  const inner = normalizeForCompare(match[2]);
+  const repeated = hostLabels
+    .map(normalizeForCompare)
+    .filter(Boolean)
+    .some(host => host === inner || host.includes(inner) || inner.includes(host));
+  return repeated ? match[1].trim() : harnessName;
+}
+
+export interface HarnessIdentity {
+  /** Harness name without a repeated host. */
+  harness: string;
+  /** Readable model label, or null when the session has no recorded model. */
+  model: string | null;
+  /** Visible text: "Claude · Opus 5.5" or just "Claude". */
+  label: string;
+  accessibilityLabel: string;
+}
+
+export function formatHarnessIdentity(session: SessionSummary): HarnessIdentity {
+  const full = formatHarnessName(session);
+  const harness = stripRepeatedHost(full, [
+    session.host.name,
+    session.host.id,
+  ]);
+  const modelId =
+    typeof session.requestedModel === 'string'
+      ? session.requestedModel.trim()
+      : '';
+  const model = modelId ? formatRequestedModelLabel(modelId) : null;
+  return {
+    harness,
+    model,
+    label: model ? `${harness} · ${model}` : harness,
+    accessibilityLabel: model
+      ? `Harness: ${harness}, requested model ${model}`
+      : `Harness: ${harness}`,
+  };
+}
+
 export { formatSessionStatusLabel, formatSessionTitle };

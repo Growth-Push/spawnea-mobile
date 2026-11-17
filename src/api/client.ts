@@ -184,6 +184,30 @@ function isValidWorktreeRef(value: unknown): boolean {
   return isRecord(value) && isNullableOptionalString(value.branch);
 }
 
+export const MAX_REQUESTED_MODEL_LENGTH = 100;
+
+/**
+ * requestedModel is optional display data: anything that is not a short, trimmed,
+ * control-character-free string is discarded instead of rejecting the session.
+ */
+export function normalizeRequestedModel(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_REQUESTED_MODEL_LENGTH) {
+    return undefined;
+  }
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const code = trimmed.charCodeAt(i);
+    // C0/C1 control characters and the Unicode line/paragraph separators.
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029) {
+      return undefined;
+    }
+  }
+  return trimmed;
+}
+
 export function isValidSessionSummary(value: unknown): value is SessionSummary {
   return (
     isRecord(value) &&
@@ -218,9 +242,12 @@ export function sanitizeSessionSummary(session: SessionSummary): SessionSummary 
         : {};
   }
 
+  const requestedModel = normalizeRequestedModel(session.requestedModel);
+
   return {
     id: session.id,
     name: session.name,
+    ...(requestedModel !== undefined ? { requestedModel } : {}),
     ...(session.parentSessionId !== undefined
       ? { parentSessionId: session.parentSessionId }
       : {}),
