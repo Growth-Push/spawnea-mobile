@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React from 'react';
-import { NativeModules, PixelRatio, Text } from 'react-native';
+import { NativeModules, PixelRatio, StyleSheet, Text } from 'react-native';
 import ReactTestRenderer from 'react-test-renderer';
 import { SpawneaApiClient } from '../src/api/client';
 import type { SessionSummary } from '../src/api/types';
@@ -317,14 +317,144 @@ describe('DashboardScreen parent/child distribution (FIXTURES)', () => {
     }
   });
 
-  test('a discreet key explains number = parents and badge = children', async () => {
+  test('child badge is a filled red overlay with light text, round for one digit and capsule for several (FIXTURES)', async () => {
+    const sessions = [
+      fx('p1', 'working'),
+      ...Array.from({ length: 12 }, (_, i) => fx(`c${i}`, 'working', 'p1')),
+      ...Array.from({ length: 3 }, (_, i) => fx(`i${i}`, 'idle')),
+      ...Array.from({ length: 2 }, (_, i) => fx(`ic${i}`, 'idle', 'i0')),
+    ];
+    const { renderer, cleanup } = await renderDashboard(sessions);
+    try {
+      const flat = (id: string) =>
+        StyleSheet.flatten(
+          renderer.root.findAllByProps({ testID: id }).find(n => typeof n.type === 'string')!
+            .props.style,
+        );
+      const multi = flat('dashboard-distribution-children-running');
+      const single = flat('dashboard-distribution-children-done/idle');
+      for (const st of [multi, single]) {
+        expect(st.position).toBe('absolute');
+        expect(st.backgroundColor).toBe('#dc2626');
+        expect(st.borderRadius).toBeGreaterThanOrEqual(st.height / 2);
+        expect(st.top).toBeLessThan(0);
+        expect(st.right).toBeLessThan(0);
+      }
+      // minWidth === height -> circle for one digit; wider content grows into a capsule.
+      expect(single.minWidth).toBe(single.height);
+      const text = renderer.root
+        .findAllByProps({ testID: 'dashboard-distribution-children-running' })
+        .find(n => typeof n.type === 'string')!
+        .findByType(Text);
+      expect(StyleSheet.flatten(text.props.style).color).toBe('#ffffff');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test('no fixed key at rest; an info trigger opens a compact popup that closes with button, backdrop and Back (FIXTURES)', async () => {
     const { renderer, cleanup } = await renderDashboard(mixed);
     try {
-      const key = renderer.root.findByProps({ testID: 'dashboard-distribution-key' });
-      expect(key.props.accessibilityLabel).toBe(
-        'Key: the number is parent sessions; the outlined badge is child sessions',
-      );
-      expect(textsIn(key)).toEqual(['Number = parents', '·', 'n', '= children']);
+      const root = renderer.root;
+      expect(root.findAllByProps({ testID: 'dashboard-distribution-key' })).toHaveLength(0);
+      const allText = () => root.findAllByType(Text).map(t => String(t.props.children));
+      expect(allText().join('|')).not.toContain('Number = parent');
+
+      const pressable = (id: string) =>
+        root.findAllByProps({ testID: id }).find(n => typeof n.props.onPress === 'function')!;
+      const trigger = pressable('dashboard-distribution-info-trigger');
+      expect(trigger.props.accessibilityLabel).toBe('About session counts');
+      expect(trigger.props.accessibilityRole).toBe('button');
+      expect(root.findByProps({ testID: 'dashboard-distribution-info-modal' }).props.visible).toBe(false);
+
+      const modal = () => root.findByProps({ testID: 'dashboard-distribution-info-modal' });
+      for (const closer of ['close', 'backdrop', 'back'] as const) {
+        await ReactTestRenderer.act(async () => {
+          trigger.props.onPress();
+        });
+        expect(modal().props.visible).toBe(true);
+        const text = allText();
+        expect(text).toEqual(
+          expect.arrayContaining([
+            'Session counts',
+            'Number = parent sessions',
+            'Red badge = child sessions',
+            'Total and bar include all sessions',
+          ]),
+        );
+        await ReactTestRenderer.act(async () => {
+          if (closer === 'close') {
+            pressable('dashboard-distribution-info-close').props.onPress();
+          } else if (closer === 'backdrop') {
+            pressable('dashboard-distribution-info-backdrop').props.onPress();
+          } else {
+            modal().props.onRequestClose();
+          }
+        });
+        expect(modal().props.visible).toBe(false);
+      }
+      // Counts and labels are unchanged by the popup.
+      expect(
+        root.findByProps({ testID: 'dashboard-legend-item-running' }).props.accessibilityLabel,
+      ).toBe('Running: 2 parent sessions, 1 child session');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test('badge hangs past the number corner without covering the digits, for multi-digit counts (FIXTURES)', async () => {
+    const sessions = [
+      ...Array.from({ length: 12 }, (_, i) => fx(`p${i}`, 'working')),
+      ...Array.from({ length: 3 }, (_, i) => fx(`pc${i}`, 'working', 'p0')),
+      ...Array.from({ length: 1000 }, (_, i) => fx(`q${i}`, 'idle')),
+      ...Array.from({ length: 25 }, (_, i) => fx(`qc${i}`, 'idle', 'q0')),
+    ];
+    const { renderer, cleanup } = await renderDashboard(sessions, 600);
+    try {
+      const host = (id: string) =>
+        renderer.root.findAllByProps({ testID: id }).find(n => typeof n.type === 'string')!;
+      for (const [cat, digits] of [['running', 1], ['done/idle', 2]] as const) {
+        for (const prefix of ['dashboard-distribution-children-']) {
+          const st = StyleSheet.flatten(host(prefix + cat).props.style);
+          // right edge = -width: the badge starts exactly where the number box ends.
+          expect(st.right).toBe(-st.width);
+          expect(st.width).toBeGreaterThanOrEqual(digits === 1 ? 15 : 22);
+        }
+        // The wrapper reserves the badge width on the right so nothing is clipped.
+        const parents = host(`dashboard-distribution-parents-${cat}`);
+        let node = parents.parent;
+        while (node && StyleSheet.flatten(node.props.style)?.marginRight === undefined) {
+          node = node.parent;
+        }
+        const wrap = StyleSheet.flatten(node!.props.style);
+        const badge = StyleSheet.flatten(host(`dashboard-distribution-children-${cat}`).props.style);
+        expect(wrap.marginRight).toBe(badge.width);
+      }
+      expect(host('dashboard-distribution-parents-running').props.children).toBe(12);
+      expect(host('dashboard-distribution-parents-done/idle').props.children).toBe(1000);
+      expect(host('dashboard-distribution-children-done/idle').findByType(Text).props.children).toBe(25);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test('multi-digit badge also fits in a wide bar segment, anchored the same way (FIXTURES)', async () => {
+    const sessions = [
+      ...Array.from({ length: 12 }, (_, i) => fx(`p${i}`, 'working')),
+      ...Array.from({ length: 3 }, (_, i) => fx(`pc${i}`, 'working', 'p0')),
+      ...Array.from({ length: 12 }, (_, i) => fx(`q${i}`, 'idle')),
+      ...Array.from({ length: 25 }, (_, i) => fx(`qc${i}`, 'idle', 'q0')),
+    ];
+    const { renderer, cleanup } = await renderDashboard(sessions, 600);
+    try {
+      for (const cat of ['running', 'done/idle']) {
+        const badge = renderer.root
+          .findAllByProps({ testID: `dashboard-bar-child-badge-${cat}` })
+          .find(n => typeof n.type === 'string')!;
+        const st = StyleSheet.flatten(badge.props.style);
+        expect(st.right).toBe(-st.width);
+        expect(st.position).toBe('absolute');
+      }
     } finally {
       await cleanup();
     }
@@ -371,8 +501,8 @@ describe('DashboardScreen parent/child distribution (FIXTURES)', () => {
       ...Array.from({ length: 4 }, (_, i) => fx(`wc${i}`, 'working', 'w0')),
       ...Array.from({ length: 13 }, (_, i) => fx(`d${i}`, 'idle')),
     ];
-    // running = 7/20 of 200dp = 70dp. '3' + badge '4' needs (9 + 21) * scale + 8.
-    const normal = await renderDashboard(sessions, 202);
+    // running = 7/20 of 120dp = 42dp. '3' + badge '4' needs 9 * scale + 17 + 8.
+    const normal = await renderDashboard(sessions, 122);
     try {
       expect(
         textsIn(normal.renderer.root.findByProps({ testID: 'dashboard-bar-segment-running' })),
@@ -382,7 +512,7 @@ describe('DashboardScreen parent/child distribution (FIXTURES)', () => {
     }
 
     jest.spyOn(PixelRatio, 'getFontScale').mockReturnValue(2.4);
-    const large = await renderDashboard(sessions, 202);
+    const large = await renderDashboard(sessions, 122);
     try {
       const seg = large.renderer.root.findByProps({ testID: 'dashboard-bar-segment-running' });
       expect(seg.findAllByType(Text)).toHaveLength(0);

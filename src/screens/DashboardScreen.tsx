@@ -2,10 +2,14 @@ import React, {
   useCallback,
   useContext,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import {
+  AccessibilityInfo,
   ActivityIndicator,
+  findNodeHandle,
+  Modal,
   PixelRatio,
   Pressable,
   RefreshControl,
@@ -98,28 +102,108 @@ function categoryVisuals(category: DashboardDistributionCategory): {
   }
 }
 
+const LEGEND_SURFACE = '#0d1117';
+const CHILD_BADGE_RED = '#dc2626';
+const CHILD_BADGE_TEXT = '#ffffff';
+
+/** Deterministic badge width so the layout can reserve exactly the room it needs. */
+function childBadgeWidth(digits: number, compact?: boolean): number {
+  const scale = Math.min(Math.max(PixelRatio.getFontScale(), 1), 1.3);
+  const minSize = compact ? 15 : 17;
+  const padding = compact ? 2 : 3;
+  return Math.max(minSize, Math.ceil(digits * 5.8 * scale) + padding * 2 + 3);
+}
+
 /**
- * Compact outlined badge for the number of child sessions. Square-ish outline and
- * the key below the legend (not color alone) distinguish it from a notification.
+ * Small filled notification-style badge for the number of child sessions: circle for
+ * one digit, capsule for more. Absolutely anchored over the top-right corner of its
+ * parent (the number wrapper); the ring takes the colour of the surface behind it.
  */
 function ChildCountBadge({
   count,
-  color,
+  ringColor,
+  compact,
+  inline,
+  anchorRight,
+  width,
   testID,
 }: {
   count: number | string;
-  color: string;
+  ringColor: string;
+  compact?: boolean;
+  inline?: boolean;
+  anchorRight?: number;
+  width?: number;
   testID?: string;
 }): React.JSX.Element {
   return (
     <View
-      style={[styles.childBadge, { borderColor: color }]}
+      style={[
+        styles.childBadge,
+        compact ? styles.childBadgeCompact : styles.childBadgeRegular,
+        inline && styles.childBadgeInline,
+        anchorRight !== undefined && { right: anchorRight },
+        width !== undefined && { width },
+        { borderColor: ringColor },
+      ]}
       testID={testID}>
       <Text
-        style={[styles.childBadgeText, { color }]}
-        numberOfLines={1}>
+        style={styles.childBadgeText}
+        numberOfLines={1}
+        maxFontSizeMultiplier={1.3}>
         {count}
       </Text>
+    </View>
+  );
+}
+
+/**
+ * Parent number with the child badge overlapping its top-right corner. Reserves room
+ * on the right/top so the badge is never clipped nor covers neighbouring content.
+ */
+function CountWithBadge({
+  parents,
+  children: childCount,
+  ringColor,
+  compact,
+  textStyle,
+  parentsTestID,
+  badgeTestID,
+}: {
+  parents: number | string;
+  children?: number | string | null;
+  ringColor: string;
+  compact?: boolean;
+  textStyle: React.ComponentProps<typeof Text>['style'];
+  parentsTestID?: string;
+  badgeTestID?: string;
+}): React.JSX.Element {
+  const hasBadge = childCount !== null && childCount !== undefined;
+  // The badge sits just past the number's top-right corner (never over the glyph):
+  // reserve exactly its width to the right of the number.
+  const badgeWidth = hasBadge
+    ? childBadgeWidth(String(childCount).length, compact)
+    : 0;
+  const reserveRight = badgeWidth;
+  return (
+    <View
+      style={[
+        styles.countWrap,
+        { marginRight: reserveRight },
+      ]}>
+      <Text style={textStyle} numberOfLines={1} testID={parentsTestID}>
+        {parents}
+      </Text>
+      {hasBadge ? (
+        <ChildCountBadge
+          count={childCount as number | string}
+          ringColor={ringColor}
+          compact={compact}
+          anchorRight={-badgeWidth}
+          width={badgeWidth}
+          testID={badgeTestID}
+        />
+      ) : null}
     </View>
   );
 }
@@ -138,6 +222,19 @@ export function DashboardScreen({
 
   const [barUsableWidth, setBarUsableWidth] = useState<number | null>(null);
   const fontScale = PixelRatio.getFontScale();
+  const [infoOpen, setInfoOpen] = useState(false);
+  const infoTriggerRef = useRef<React.ComponentRef<typeof Pressable>>(null);
+  const openInfo = useCallback(() => setInfoOpen(true), []);
+  const closeInfo = useCallback(() => {
+    setInfoOpen(false);
+    // Return accessibility focus to the trigger once the popup is gone.
+    setTimeout(() => {
+      const handle = findNodeHandle(infoTriggerRef.current);
+      if (handle) {
+        AccessibilityInfo.setAccessibilityFocus(handle);
+      }
+    }, 100);
+  }, []);
   const [expandedParentIds, setExpandedParentIds] = useState<
     Record<string, boolean>
   >({});
@@ -388,9 +485,60 @@ export function DashboardScreen({
 
       {activeSnapshot && summary ? (
         <>
+          <Modal
+            visible={infoOpen}
+            transparent
+            animationType="fade"
+            statusBarTranslucent
+            onRequestClose={closeInfo}
+            testID="dashboard-distribution-info-modal">
+            <Pressable
+              style={styles.infoBackdrop}
+              onPress={closeInfo}
+              accessible={false}
+              testID="dashboard-distribution-info-backdrop">
+              <View
+                style={styles.infoPopup}
+                accessibilityViewIsModal
+                testID="dashboard-distribution-info-popup"
+                onStartShouldSetResponder={() => true}>
+                <Text style={styles.infoTitle} accessibilityRole="header">
+                  Session counts
+                </Text>
+                <Text style={styles.infoLine}>Number = parent sessions</Text>
+                <View style={styles.infoLineRow}>
+                  <ChildCountBadge count="n" ringColor="#161b22" inline />
+                  <Text style={styles.infoLine}>Red badge = child sessions</Text>
+                </View>
+                <Text style={styles.infoLine}>
+                  Total and bar include all sessions
+                </Text>
+                <Pressable
+                  testID="dashboard-distribution-info-close"
+                  accessibilityRole="button"
+                  accessibilityLabel="Close"
+                  style={styles.infoClose}
+                  onPress={closeInfo}>
+                  <Text style={styles.infoCloseText}>Close</Text>
+                </Pressable>
+              </View>
+            </Pressable>
+          </Modal>
           <View style={styles.card} testID="dashboard-summary-card">
             <View style={styles.summaryHeaderRow}>
-              <Text style={styles.summaryHeading}>Session distribution</Text>
+              <View style={styles.summaryTitleGroup}>
+                <Text style={styles.summaryHeading}>Session distribution</Text>
+                <Pressable
+                  ref={infoTriggerRef}
+                  testID="dashboard-distribution-info-trigger"
+                  accessibilityRole="button"
+                  accessibilityLabel="About session counts"
+                  hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+                  style={styles.infoTrigger}
+                  onPress={openInfo}>
+                  <Text style={styles.infoTriggerGlyph}>ⓘ</Text>
+                </Pressable>
+              </View>
               <Text
                 style={styles.totalCountText}
                 testID="dashboard-total-sessions">
@@ -424,11 +572,12 @@ export function DashboardScreen({
                   const widthPercent = ratio * 100;
                   const parentText = String(item.parentCount);
                   const childText = String(item.childCount);
-                  // Parent number + (when there are children) the outlined badge.
+                  // Parent number + (when there are children) the overlapping badge.
                   const minNeededWidthDp =
-                    (parentText.length * 9 +
-                      (item.childCount > 0 ? childText.length * 7 + 14 : 0)) *
-                      fontScale +
+                    parentText.length * 9 * fontScale +
+                    (item.childCount > 0
+                      ? childBadgeWidth(childText.length, true)
+                      : 0) +
                     8;
                   const segmentWidthDp =
                     barUsableWidth !== null ? barUsableWidth * ratio : null;
@@ -451,23 +600,17 @@ export function DashboardScreen({
                         },
                       ]}>
                       {showSegmentCount ? (
-                        <View style={styles.segmentContent}>
-                          <Text
-                            style={[
-                              styles.distributionBarText,
-                              { color: visuals.barText },
-                            ]}
-                            numberOfLines={1}>
-                            {item.parentCount}
-                          </Text>
-                          {item.childCount > 0 ? (
-                            <ChildCountBadge
-                              count={item.childCount}
-                              color={visuals.barText}
-                              testID={`dashboard-bar-child-badge-${item.category}`}
-                            />
-                          ) : null}
-                        </View>
+                        <CountWithBadge
+                          parents={item.parentCount}
+                          children={item.childCount > 0 ? item.childCount : null}
+                          ringColor={visuals.barBg}
+                          compact
+                          textStyle={[
+                            styles.distributionBarText,
+                            { color: visuals.barText },
+                          ]}
+                          badgeTestID={`dashboard-bar-child-badge-${item.category}`}
+                        />
                       ) : null}
                     </View>
                   );
@@ -491,18 +634,14 @@ export function DashboardScreen({
                     <View
                       style={[styles.legendDot, { backgroundColor: visuals.dot }]}
                     />
-                    <Text
-                      style={styles.legendNumber}
-                      testID={`dashboard-distribution-parents-${item.category}`}>
-                      {item.parentCount}
-                    </Text>
-                    {item.childCount > 0 ? (
-                      <ChildCountBadge
-                        count={item.childCount}
-                        color="#9ca3af"
-                        testID={`dashboard-distribution-children-${item.category}`}
-                      />
-                    ) : null}
+                    <CountWithBadge
+                      parents={item.parentCount}
+                      children={item.childCount > 0 ? item.childCount : null}
+                      ringColor={LEGEND_SURFACE}
+                      textStyle={styles.legendNumber}
+                      parentsTestID={`dashboard-distribution-parents-${item.category}`}
+                      badgeTestID={`dashboard-distribution-children-${item.category}`}
+                    />
                     <Text
                       style={styles.legendText}
                       testID={`dashboard-legend-${item.category}`}>
@@ -511,17 +650,6 @@ export function DashboardScreen({
                   </View>
                 );
               })}
-            </View>
-
-            <View
-              style={styles.distributionKey}
-              testID="dashboard-distribution-key"
-              accessible
-              accessibilityLabel="Key: the number is parent sessions; the outlined badge is child sessions">
-              <Text style={styles.distributionKeyText}>Number = parents</Text>
-              <Text style={styles.distributionKeyText}>·</Text>
-              <ChildCountBadge count="n" color="#9ca3af" />
-              <Text style={styles.distributionKeyText}>= children</Text>
             </View>
 
             {summary.unknownCount > 0 ? (
@@ -1043,6 +1171,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   legendRow: {
+    paddingTop: 8,
     flexDirection: 'row',
     flexWrap: 'wrap',
     alignItems: 'center',
@@ -1075,33 +1204,107 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#f0f6fc',
   },
-  childBadge: {
-    borderWidth: 1,
-    borderRadius: 4,
-    paddingHorizontal: 4,
-    minWidth: 16,
+  countWrap: {
     alignItems: 'center',
     justifyContent: 'center',
   },
+  childBadge: {
+    position: 'absolute',
+    backgroundColor: CHILD_BADGE_RED,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  childBadgeRegular: {
+    top: -9,
+    minWidth: 17,
+    height: 17,
+    borderRadius: 9,
+    paddingHorizontal: 3,
+  },
+  childBadgeCompact: {
+    top: -1,
+    minWidth: 15,
+    height: 15,
+    borderRadius: 8,
+    paddingHorizontal: 2,
+  },
+  childBadgeInline: {
+    position: 'relative',
+    top: 0,
+    right: 0,
+  },
   childBadgeText: {
-    fontSize: 11,
+    fontSize: 10,
+    lineHeight: 12,
     fontWeight: '700',
+    color: CHILD_BADGE_TEXT,
+    includeFontPadding: false,
   },
-  segmentContent: {
+  summaryTitleGroup: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 2,
+    flexShrink: 1,
   },
-  distributionKey: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+  infoTrigger: {
+    minWidth: 48,
+    minHeight: 48,
+    marginVertical: -14,
     alignItems: 'center',
-    columnGap: 6,
-    rowGap: 2,
+    justifyContent: 'center',
   },
-  distributionKeyText: {
-    fontSize: 11,
+  infoTriggerGlyph: {
+    fontSize: 16,
     color: '#9ca3af',
+  },
+  infoBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(1, 4, 9, 0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  infoPopup: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#161b22',
+    borderWidth: 1,
+    borderColor: '#30363d',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 4,
+    gap: 10,
+  },
+  infoTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#f0f6fc',
+  },
+  infoLineRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  infoLine: {
+    fontSize: 13,
+    color: '#cbd5e1',
+    flexShrink: 1,
+  },
+  infoClose: {
+    alignSelf: 'flex-end',
+    marginTop: -4,
+    minHeight: 48,
+    minWidth: 48,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  infoCloseText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#a78bfa',
   },
   legendDot: {
     width: 8,
