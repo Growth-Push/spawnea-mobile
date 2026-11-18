@@ -336,15 +336,16 @@ export function formatHarnessName(session: SessionSummary): string {
  * Explicit, tested mapping of known model IDs to readable names. Anything else is
  * shown as its (already sanitized) ID: no commercial name is ever guessed.
  */
-export const KNOWN_MODEL_LABELS: Readonly<Record<string, string>> = {
-  'claude-opus-5-5': 'Opus 5.5',
-  'claude-sonnet-5-5': 'Sonnet 5.5',
-  'claude-haiku-5-5': 'Haiku 5.5',
-  'claude-fable-5-2': 'Fable 5.2',
-};
+export const KNOWN_MODEL_LABELS: ReadonlyMap<string, string> = new Map([
+  ['claude-opus-5-5', 'Opus 5.5'],
+  ['claude-sonnet-5-5', 'Sonnet 5.5'],
+  ['claude-haiku-5-5', 'Haiku 5.5'],
+  ['claude-fable-5-2', 'Fable 5.2'],
+]);
 
+/** Map lookup only: inherited keys such as "constructor" or "__proto__" never match. */
 export function formatRequestedModelLabel(modelId: string): string {
-  return KNOWN_MODEL_LABELS[modelId.trim().toLowerCase()] ?? modelId;
+  return KNOWN_MODEL_LABELS.get(modelId.trim().toLowerCase()) ?? modelId;
 }
 
 function normalizeForCompare(value: string): string {
@@ -362,10 +363,9 @@ export function stripRepeatedHost(harnessName: string, hostLabels: string[]): st
     return harnessName;
   }
   const inner = normalizeForCompare(match[2]);
-  const repeated = hostLabels
-    .map(normalizeForCompare)
-    .filter(Boolean)
-    .some(host => host === inner || host.includes(inner) || inner.includes(host));
+  // Full equality with the host name or id (normalized); never partial inclusion.
+  const repeated =
+    inner !== '' && hostLabels.map(normalizeForCompare).some(host => host === inner);
   return repeated ? match[1].trim() : harnessName;
 }
 

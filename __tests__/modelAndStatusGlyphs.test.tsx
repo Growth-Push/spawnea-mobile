@@ -157,10 +157,41 @@ describe('harness identity with requested model (FIXTURES)', () => {
 
   test('stripRepeatedHost only drops a parenthetical that repeats the host', () => {
     expect(stripRepeatedHost('Claude (Local · Arch)', ['Local · Arch'])).toBe('Claude');
-    expect(stripRepeatedHost('Codex (Local · Arch)', ['Local', 'local'])).toBe('Codex');
+    expect(stripRepeatedHost('Codex (Local)', ['Local · Arch', 'local'])).toBe('Codex');
+    expect(stripRepeatedHost('Codex (local)', ['Local', 'local'])).toBe('Codex');
     expect(stripRepeatedHost('Claude (Review)', ['Local · Arch'])).toBe('Claude (Review)');
     expect(stripRepeatedHost('(Local · Arch)', ['Local · Arch'])).toBe('(Local · Arch)');
     expect(stripRepeatedHost('Claude', ['Local · Arch'])).toBe('Claude');
+  });
+
+  test('inherited object keys are shown as the received ID, also in the accessible label', () => {
+    for (const id of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf', 'prototype']) {
+      expect(formatRequestedModelLabel(id)).toBe(id);
+      const identity = formatHarnessIdentity(claude({ requestedModel: id }));
+      expect(identity.model).toBe(id);
+      expect(identity.label).toBe(`Claude · ${id}`);
+      expect(identity.accessibilityLabel).toBe(`Harness: Claude, requested model ${id}`);
+      expect(identity.label).not.toMatch(/function|object/i);
+    }
+  });
+
+  test('a partial word of the host does not strip a legitimate parenthetical (judge cases)', () => {
+    expect(stripRepeatedHost('Claude (Local preview)', ['Local · Arch', 'local'])).toBe(
+      'Claude (Local preview)',
+    );
+    expect(stripRepeatedHost('Claude (Local · Arch)', ['Local · Arch', 'local'])).toBe('Claude');
+    expect(stripRepeatedHost('Claude (Arch)', ['Local · Arch'])).toBe('Claude (Arch)');
+    expect(stripRepeatedHost('Claude (Local preview · Arch)', ['Local · Arch'])).toBe(
+      'Claude (Local preview · Arch)',
+    );
+    expect(
+      formatHarnessIdentity(
+        claude({
+          host: { id: 'local', name: 'Local · Arch' },
+          harness: { id: 'local:claude', name: 'Claude (Local preview)', command: 'claude' },
+        }),
+      ).label,
+    ).toBe('Claude (Local preview)');
   });
 
   test('a long unknown model id stays a single string (UI truncates it)', () => {

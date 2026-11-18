@@ -75,3 +75,16 @@ The seven status glyphs reproduce the canonical mapping of Spawnea Desktop's `St
 | unknown status | question-mark circle (fallback) | `circle-question-mark` |
 
 ISC License. Copyright (c) 2026 Lucide Icons and Contributors. Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies. THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS.
+
+### Feather-derived glyphs (MIT)
+
+`lucide-react@1.70.0` ships a `LICENSE` that lists the icons below as derived from the Feather project, under the MIT License, Copyright (c) 2013-present Cole Bemis. Four of the glyphs in `StatusGlyphs.tsx` are on that list:
+
+| Status | lucide icon (alias in the Feather-derived list) |
+|---|---|
+| working | `radio` |
+| idle | `clock` |
+| error | `circle-exclamation-point` (`alert-circle`) |
+| unknown status (fallback) | `circle-question-mark` (`help-circle`) |
+
+The MIT License (MIT) (for the icons listed above). Copyright (c) 2013-present Cole Bemis. Permission is hereby granted, free of charge, to any person obtaining a copy of the Software and associated documentation files, to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions: The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
