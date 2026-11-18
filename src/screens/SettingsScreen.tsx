@@ -14,6 +14,7 @@ import {
   View,
 } from 'react-native';
 import { NavigationContext } from '@react-navigation/native';
+import { GrowthPushSignature } from '../dashboard/DashboardIcons';
 import {
   defaultApiClient,
   formatApiErrorMessage,
@@ -471,6 +472,8 @@ export function SettingsScreen({
             ? 'https://machine.tailnet.ts.net or http://127.0.0.1:5757'
             : 'https://machine.tailnet.ts.net'
         }
+        placeholderTextColor="#6e7681"
+        selectionColor="#a78bfa"
         autoCapitalize="none"
         autoCorrect={false}
         keyboardType="url"
@@ -491,6 +494,8 @@ export function SettingsScreen({
             ? 'Saved key is protected; enter new key to replace'
             : 'Enter API key'
         }
+        placeholderTextColor="#6e7681"
+        selectionColor="#a78bfa"
         secureTextEntry
         autoCapitalize="none"
         autoCorrect={false}
@@ -561,6 +566,10 @@ export function SettingsScreen({
           </Text>
         </Pressable>
       </View>
+
+      <View style={styles.footerSignature} testID="settings-growth-push-footer">
+        <GrowthPushSignature />
+      </View>
     </ScrollView>
   );
 }
@@ -581,7 +590,7 @@ function bannerStyleForTone(tone: StatusTone) {
 const styles = StyleSheet.create({
   scroll: {
     flex: 1,
-    backgroundColor: '#f8fafc',
+    backgroundColor: '#0d1117',
   },
   container: {
     padding: 20,
@@ -589,40 +598,40 @@ const styles = StyleSheet.create({
   },
   subtitle: {
     fontSize: 14,
-    color: '#475569',
+    color: '#9ca3af',
     marginBottom: 16,
   },
   securityBox: {
-    backgroundColor: '#ffffff',
+    backgroundColor: '#111620',
     borderWidth: 1,
-    borderColor: '#cbd5e1',
-    borderRadius: 10,
-    padding: 12,
+    borderColor: '#21262d',
+    borderRadius: 12,
+    padding: 14,
     marginBottom: 18,
     gap: 4,
   },
   securityTitle: {
     fontSize: 13,
     fontWeight: '700',
-    color: '#1e293b',
+    color: '#f0f6fc',
   },
   securityText: {
     fontSize: 13,
-    color: '#334155',
+    color: '#9ca3af',
     lineHeight: 18,
   },
   label: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#1e293b',
+    color: '#e6edf3',
     marginBottom: 6,
   },
   input: {
     borderWidth: 1,
-    borderColor: '#cbd5e1',
+    borderColor: '#30363d',
     borderRadius: 8,
-    backgroundColor: '#ffffff',
-    color: '#0f172a',
+    backgroundColor: '#161b22',
+    color: '#f0f6fc',
     paddingHorizontal: 12,
     paddingVertical: 10,
     fontSize: 15,
@@ -635,7 +644,7 @@ const styles = StyleSheet.create({
   },
   primaryButton: {
     flex: 1,
-    backgroundColor: '#2563eb',
+    backgroundColor: '#7c3aed',
     borderRadius: 8,
     paddingVertical: 12,
     alignItems: 'center',
@@ -643,60 +652,62 @@ const styles = StyleSheet.create({
   primaryButtonText: {
     color: '#ffffff',
     fontSize: 15,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   secondaryButton: {
     flex: 1,
-    backgroundColor: '#e2e8f0',
+    backgroundColor: '#161b22',
+    borderWidth: 1,
+    borderColor: '#30363d',
     borderRadius: 8,
     paddingVertical: 12,
     alignItems: 'center',
   },
   secondaryButtonText: {
-    color: '#0f172a',
+    color: '#f0f6fc',
     fontSize: 15,
     fontWeight: '600',
   },
   buttonDisabled: {
-    opacity: 0.6,
+    opacity: 0.55,
   },
   banner: {
     marginTop: 14,
-    borderRadius: 8,
+    borderRadius: 10,
     padding: 12,
     borderWidth: 1,
   },
   bannerSuccess: {
-    backgroundColor: '#ecfdf5',
-    borderColor: '#6ee7b7',
+    backgroundColor: '#0e2820',
+    borderColor: '#059669',
   },
   bannerWarning: {
-    backgroundColor: '#fffbeb',
-    borderColor: '#fcd34d',
+    backgroundColor: '#271e09',
+    borderColor: '#d97706',
   },
   bannerError: {
-    backgroundColor: '#fef2f2',
-    borderColor: '#fca5a5',
+    backgroundColor: '#261114',
+    borderColor: '#dc2626',
   },
   bannerNeutral: {
-    backgroundColor: '#f1f5f9',
-    borderColor: '#cbd5e1',
+    backgroundColor: '#161b22',
+    borderColor: '#30363d',
   },
   bannerText: {
     fontSize: 14,
-    color: '#0f172a',
+    color: '#e6edf3',
     lineHeight: 19,
   },
   dangerSection: {
     marginTop: 24,
     paddingTop: 16,
     borderTopWidth: 1,
-    borderTopColor: '#e2e8f0',
+    borderTopColor: '#21262d',
     gap: 10,
   },
   noticeText: {
     fontSize: 13,
-    color: '#475569',
+    color: '#9ca3af',
     lineHeight: 18,
   },
   dangerButton: {
@@ -705,11 +716,18 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingVertical: 11,
     alignItems: 'center',
-    backgroundColor: '#ffffff',
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
   },
   dangerButtonText: {
-    color: '#dc2626',
+    color: '#fecaca',
     fontSize: 15,
     fontWeight: '600',
+  },
+  footerSignature: {
+    marginTop: 24,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: '#21262d',
+    alignItems: 'center',
   },
 });

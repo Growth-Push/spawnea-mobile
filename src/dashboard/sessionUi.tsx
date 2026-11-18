@@ -1,5 +1,6 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
+import { StatusGlyph } from './StatusGlyphs';
 import {
   DashboardErrorKind,
   formatSessionStatusLabel,
@@ -157,9 +158,7 @@ export function StatusChip({ status }: { status: string }): React.JSX.Element {
       style={[sessionUiStyles.statusChip, visuals.container]}
       accessible
       accessibilityLabel={`Status: ${label}`}>
-      <View
-        style={[sessionUiStyles.statusChipDot, { backgroundColor: visuals.dot }]}
-      />
+      <StatusGlyph status={status} color={visuals.dot} size={12} />
       <Text style={[sessionUiStyles.statusChipText, { color: visuals.text }]}>
         {label}
       </Text>
@@ -208,11 +207,6 @@ export const sessionUiStyles = StyleSheet.create({
   chipNeutral: {
     backgroundColor: 'rgba(148, 163, 184, 0.12)',
     borderColor: '#475569',
-  },
-  statusChipDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
   },
   statusChipText: {
     fontSize: 11,

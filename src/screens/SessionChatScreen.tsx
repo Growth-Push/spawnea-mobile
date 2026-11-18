@@ -74,7 +74,7 @@ import {
   useSessionChatSync,
 } from '../hooks/useSessionChatSync';
 import {
-  formatHarnessName,
+  formatHarnessIdentity,
   formatHostName,
   formatProjectName,
 } from '../sessions/sessionsModel';
@@ -1134,24 +1134,40 @@ export function SessionChatScreen({
           </Pressable>
 
           <View style={styles.headerTitleCol}>
-            <Text
-              style={styles.headerTitle}
-              numberOfLines={1}
-              ellipsizeMode="tail"
-              testID="session-chat-title">
-              {sessionTitle}
-            </Text>
+            <View style={styles.headerTitleRow}>
+              <SpawneaMarkIcon color="#a78bfa" size={20} />
+              <Text
+                style={[styles.headerTitle, styles.headerTitleText]}
+                numberOfLines={1}
+                ellipsizeMode="tail"
+                testID="session-chat-title">
+                {sessionTitle}
+              </Text>
+            </View>
             {session ? (
               <View style={styles.headerMetaRow}>
                 <StatusChip status={session.status} />
-                <View style={styles.metaChip}>
-                  <HarnessIcon color="#a78bfa" size={11} />
-                  <Text style={styles.metaText}>
-                    {formatHarnessName(session)}
+                <View
+                  style={styles.metaChip}
+                  accessible
+                  accessibilityLabel={formatHarnessIdentity(session).accessibilityLabel}>
+                  <HarnessIcon
+                    color="#a78bfa"
+                    size={11}
+                    harnessId={session.harness.id}
+                    harnessName={session.harness.name}
+                    harnessCommand={session.harness.command}
+                  />
+                  <Text style={styles.metaText} numberOfLines={2}>
+                    {formatHarnessIdentity(session).label}
                   </Text>
                 </View>
                 <View style={styles.metaChip}>
-                  <HostIcon color="#8b949e" size={11} />
+                  <HostIcon
+                    color="#8b949e"
+                    size={11}
+                    hostName={formatHostName(session)}
+                  />
                   <Text style={styles.metaText}>{formatHostName(session)}</Text>
                 </View>
                 <View style={styles.metaChip}>
@@ -2131,6 +2147,14 @@ const styles = StyleSheet.create({
   headerTitleCol: {
     flex: 1,
     gap: 3,
+  },
+  headerTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  headerTitleText: {
+    flex: 1,
   },
   headerTitle: {
     fontSize: 16,

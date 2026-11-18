@@ -2,10 +2,14 @@ import React, {
   useCallback,
   useContext,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import {
+  AccessibilityInfo,
   ActivityIndicator,
+  findNodeHandle,
+  Modal,
   PixelRatio,
   Pressable,
   RefreshControl,
@@ -32,10 +36,12 @@ import {
 import {
   computeDistributionSummary,
   DashboardDistributionCategory,
+  formatDistributionAccessibilityLabel,
   formatSessionStatusLabel,
   formatSessionTitle,
   partitionDashboardSessions,
 } from '../dashboard/dashboardModel';
+import { formatHarnessIdentity } from '../sessions/sessionsModel';
 import {
   badgeVisuals,
   connectionBadgeLabel,
@@ -97,6 +103,112 @@ function categoryVisuals(category: DashboardDistributionCategory): {
   }
 }
 
+const LEGEND_SURFACE = '#0d1117';
+const CHILD_BADGE_RED = '#dc2626';
+const CHILD_BADGE_TEXT = '#ffffff';
+
+/** Deterministic badge width so the layout can reserve exactly the room it needs. */
+function childBadgeWidth(digits: number, compact?: boolean): number {
+  const scale = Math.min(Math.max(PixelRatio.getFontScale(), 1), 1.3);
+  const minSize = compact ? 15 : 17;
+  const padding = compact ? 2 : 3;
+  return Math.max(minSize, Math.ceil(digits * 5.8 * scale) + padding * 2 + 3);
+}
+
+/**
+ * Small filled notification-style badge for the number of child sessions: circle for
+ * one digit, capsule for more. Absolutely anchored over the top-right corner of its
+ * parent (the number wrapper); the ring takes the colour of the surface behind it.
+ */
+function ChildCountBadge({
+  count,
+  ringColor,
+  compact,
+  inline,
+  anchorRight,
+  width,
+  testID,
+}: {
+  count: number | string;
+  ringColor: string;
+  compact?: boolean;
+  inline?: boolean;
+  anchorRight?: number;
+  width?: number;
+  testID?: string;
+}): React.JSX.Element {
+  return (
+    <View
+      style={[
+        styles.childBadge,
+        compact ? styles.childBadgeCompact : styles.childBadgeRegular,
+        inline && styles.childBadgeInline,
+        anchorRight !== undefined && { right: anchorRight },
+        width !== undefined && { width },
+        { borderColor: ringColor },
+      ]}
+      testID={testID}>
+      <Text
+        style={styles.childBadgeText}
+        numberOfLines={1}
+        maxFontSizeMultiplier={1.3}>
+        {count}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * Parent number with the child badge overlapping its top-right corner. Reserves room
+ * on the right/top so the badge is never clipped nor covers neighbouring content.
+ */
+function CountWithBadge({
+  parents,
+  children: childCount,
+  ringColor,
+  compact,
+  textStyle,
+  parentsTestID,
+  badgeTestID,
+}: {
+  parents: number | string;
+  children?: number | string | null;
+  ringColor: string;
+  compact?: boolean;
+  textStyle: React.ComponentProps<typeof Text>['style'];
+  parentsTestID?: string;
+  badgeTestID?: string;
+}): React.JSX.Element {
+  const hasBadge = childCount !== null && childCount !== undefined;
+  // The badge sits just past the number's top-right corner (never over the glyph):
+  // reserve exactly its width to the right of the number.
+  const badgeWidth = hasBadge
+    ? childBadgeWidth(String(childCount).length, compact)
+    : 0;
+  const reserveRight = badgeWidth;
+  return (
+    <View
+      style={[
+        styles.countWrap,
+        { marginRight: reserveRight },
+      ]}>
+      <Text style={textStyle} numberOfLines={1} testID={parentsTestID}>
+        {parents}
+      </Text>
+      {hasBadge ? (
+        <ChildCountBadge
+          count={childCount as number | string}
+          ringColor={ringColor}
+          compact={compact}
+          anchorRight={-badgeWidth}
+          width={badgeWidth}
+          testID={badgeTestID}
+        />
+      ) : null}
+    </View>
+  );
+}
+
 export function DashboardScreen({
   onOpenSettings,
   onOpenSessionChat,
@@ -111,6 +223,19 @@ export function DashboardScreen({
 
   const [barUsableWidth, setBarUsableWidth] = useState<number | null>(null);
   const fontScale = PixelRatio.getFontScale();
+  const [infoOpen, setInfoOpen] = useState(false);
+  const infoTriggerRef = useRef<React.ComponentRef<typeof Pressable>>(null);
+  const openInfo = useCallback(() => setInfoOpen(true), []);
+  const closeInfo = useCallback(() => {
+    setInfoOpen(false);
+    // Return accessibility focus to the trigger once the popup is gone.
+    setTimeout(() => {
+      const handle = findNodeHandle(infoTriggerRef.current);
+      if (handle) {
+        AccessibilityInfo.setAccessibilityFocus(handle);
+      }
+    }, 100);
+  }, []);
   const [expandedParentIds, setExpandedParentIds] = useState<
     Record<string, boolean>
   >({});
@@ -361,9 +486,60 @@ export function DashboardScreen({
 
       {activeSnapshot && summary ? (
         <>
+          <Modal
+            visible={infoOpen}
+            transparent
+            animationType="fade"
+            statusBarTranslucent
+            onRequestClose={closeInfo}
+            testID="dashboard-distribution-info-modal">
+            <Pressable
+              style={styles.infoBackdrop}
+              onPress={closeInfo}
+              accessible={false}
+              testID="dashboard-distribution-info-backdrop">
+              <View
+                style={styles.infoPopup}
+                accessibilityViewIsModal
+                testID="dashboard-distribution-info-popup"
+                onStartShouldSetResponder={() => true}>
+                <Text style={styles.infoTitle} accessibilityRole="header">
+                  Session counts
+                </Text>
+                <Text style={styles.infoLine}>Number = parent sessions</Text>
+                <View style={styles.infoLineRow}>
+                  <ChildCountBadge count="n" ringColor="#161b22" inline />
+                  <Text style={styles.infoLine}>Red badge = child sessions</Text>
+                </View>
+                <Text style={styles.infoLine}>
+                  Total and bar include all sessions
+                </Text>
+                <Pressable
+                  testID="dashboard-distribution-info-close"
+                  accessibilityRole="button"
+                  accessibilityLabel="Close"
+                  style={styles.infoClose}
+                  onPress={closeInfo}>
+                  <Text style={styles.infoCloseText}>Close</Text>
+                </Pressable>
+              </View>
+            </Pressable>
+          </Modal>
           <View style={styles.card} testID="dashboard-summary-card">
             <View style={styles.summaryHeaderRow}>
-              <Text style={styles.summaryHeading}>Session distribution</Text>
+              <View style={styles.summaryTitleGroup}>
+                <Text style={styles.summaryHeading}>Session distribution</Text>
+                <Pressable
+                  ref={infoTriggerRef}
+                  testID="dashboard-distribution-info-trigger"
+                  accessibilityRole="button"
+                  accessibilityLabel="About session counts"
+                  hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+                  style={styles.infoTrigger}
+                  onPress={openInfo}>
+                  <Text style={styles.infoTriggerGlyph}>ⓘ</Text>
+                </Pressable>
+              </View>
               <Text
                 style={styles.totalCountText}
                 testID="dashboard-total-sessions">
@@ -395,22 +571,28 @@ export function DashboardScreen({
                   const ratio =
                     summary.total > 0 ? item.count / summary.total : 0;
                   const widthPercent = ratio * 100;
-                  const countText = String(item.count);
+                  const parentText = String(item.parentCount);
+                  const childText = String(item.childCount);
+                  // Parent number + (when there are children) the overlapping badge.
                   const minNeededWidthDp =
-                    countText.length * 9 * fontScale + 8;
+                    parentText.length * 9 * fontScale +
+                    (item.childCount > 0
+                      ? childBadgeWidth(childText.length, true)
+                      : 0) +
+                    8;
                   const segmentWidthDp =
                     barUsableWidth !== null ? barUsableWidth * ratio : null;
                   const showSegmentCount =
                     segmentWidthDp !== null
                       ? segmentWidthDp >= minNeededWidthDp
-                      : ratio >= 0.1;
+                      : ratio >= 0.1 && item.childCount === 0;
 
                   return (
                     <View
                       key={item.category}
                       testID={`dashboard-bar-segment-${item.category}`}
                       accessible
-                      accessibilityLabel={`${item.count} ${item.label}`}
+                      accessibilityLabel={formatDistributionAccessibilityLabel(item)}
                       style={[
                         styles.distributionBarSegment,
                         {
@@ -419,14 +601,17 @@ export function DashboardScreen({
                         },
                       ]}>
                       {showSegmentCount ? (
-                        <Text
-                          style={[
+                        <CountWithBadge
+                          parents={item.parentCount}
+                          children={item.childCount > 0 ? item.childCount : null}
+                          ringColor={visuals.barBg}
+                          compact
+                          textStyle={[
                             styles.distributionBarText,
                             { color: visuals.barText },
                           ]}
-                          numberOfLines={1}>
-                          {item.count}
-                        </Text>
+                          badgeTestID={`dashboard-bar-child-badge-${item.category}`}
+                        />
                       ) : null}
                     </View>
                   );
@@ -439,14 +624,29 @@ export function DashboardScreen({
               {summary.categories.map(item => {
                 const visuals = categoryVisuals(item.category);
                 return (
-                  <View key={item.category} style={styles.legendItem}>
+                  <View
+                    key={item.category}
+                    style={styles.legendItem}
+                    testID={`dashboard-legend-item-${item.category}`}
+                    accessible
+                    accessibilityLabel={formatDistributionAccessibilityLabel(
+                      item,
+                    )}>
                     <View
                       style={[styles.legendDot, { backgroundColor: visuals.dot }]}
+                    />
+                    <CountWithBadge
+                      parents={item.parentCount}
+                      children={item.childCount > 0 ? item.childCount : null}
+                      ringColor={LEGEND_SURFACE}
+                      textStyle={styles.legendNumber}
+                      parentsTestID={`dashboard-distribution-parents-${item.category}`}
+                      badgeTestID={`dashboard-distribution-children-${item.category}`}
                     />
                     <Text
                       style={styles.legendText}
                       testID={`dashboard-legend-${item.category}`}>
-                      {item.count} {item.label}
+                      {item.label}
                     </Text>
                   </View>
                 );
@@ -585,10 +785,7 @@ function SessionCard({
   const trimmedTask = session.task.trim();
   const showTaskSubtitle = trimmedTask.length > 0 && trimmedTask !== title;
   const hostLabel = session.host.name.trim() || session.host.id;
-  const harnessLabel =
-    session.harness.name.trim() ||
-    session.harness.command.trim() ||
-    session.harness.id;
+  const harnessIdentity = formatHarnessIdentity(session);
   const branchLabel = session.worktree?.branch?.trim() || null;
 
   return (
@@ -624,16 +821,24 @@ function SessionCard({
             style={styles.metaItem}
             accessible
             accessibilityLabel={`Host: ${hostLabel}`}>
-            <HostIcon color="#8b949e" size={12} />
+            <HostIcon color="#8b949e" size={12} hostName={hostLabel} />
             <Text style={styles.metaText}>{hostLabel}</Text>
           </View>
 
           <View
             style={styles.metaItem}
             accessible
-            accessibilityLabel={`Harness: ${harnessLabel}`}>
-            <HarnessIcon color="#a78bfa" size={12} />
-            <Text style={styles.metaText}>{harnessLabel}</Text>
+            accessibilityLabel={harnessIdentity.accessibilityLabel}>
+            <HarnessIcon
+              color="#a78bfa"
+              size={12}
+              harnessId={session.harness.id}
+              harnessName={session.harness.name}
+              harnessCommand={session.harness.command}
+            />
+            <Text style={styles.metaText} numberOfLines={2}>
+              {harnessIdentity.label}
+            </Text>
           </View>
 
           {branchLabel ? (
@@ -709,10 +914,7 @@ function SessionCard({
                       const childTitle = formatSessionTitle(child);
                       const childHost =
                         child.host.name.trim() || child.host.id;
-                      const childHarness =
-                        child.harness.name.trim() ||
-                        child.harness.command.trim() ||
-                        child.harness.id;
+                      const childIdentity = formatHarnessIdentity(child);
                       const childBranch = child.worktree?.branch?.trim() || null;
                       return (
                         <Pressable
@@ -740,15 +942,27 @@ function SessionCard({
                               style={styles.metaItem}
                               accessible
                               accessibilityLabel={`Host: ${childHost}`}>
-                              <HostIcon color="#8b949e" size={11} />
+                              <HostIcon
+                                color="#8b949e"
+                                size={11}
+                                hostName={childHost}
+                              />
                               <Text style={styles.metaText}>{childHost}</Text>
                             </View>
                             <View
                               style={styles.metaItem}
                               accessible
-                              accessibilityLabel={`Harness: ${childHarness}`}>
-                              <HarnessIcon color="#a78bfa" size={11} />
-                              <Text style={styles.metaText}>{childHarness}</Text>
+                              accessibilityLabel={childIdentity.accessibilityLabel}>
+                              <HarnessIcon
+                                color="#a78bfa"
+                                size={11}
+                                harnessId={child.harness.id}
+                                harnessName={child.harness.name}
+                                harnessCommand={child.harness.command}
+                              />
+                              <Text style={styles.metaText} numberOfLines={2}>
+                                {childIdentity.label}
+                              </Text>
                             </View>
                             {childBranch ? (
                               <View
@@ -956,6 +1170,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   legendRow: {
+    paddingTop: 8,
     flexDirection: 'row',
     flexWrap: 'wrap',
     alignItems: 'center',
@@ -982,6 +1197,113 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 5,
     flexShrink: 1,
+  },
+  legendNumber: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#f0f6fc',
+  },
+  countWrap: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  childBadge: {
+    position: 'absolute',
+    backgroundColor: CHILD_BADGE_RED,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  childBadgeRegular: {
+    top: -9,
+    minWidth: 17,
+    height: 17,
+    borderRadius: 9,
+    paddingHorizontal: 3,
+  },
+  childBadgeCompact: {
+    top: -1,
+    minWidth: 15,
+    height: 15,
+    borderRadius: 8,
+    paddingHorizontal: 2,
+  },
+  childBadgeInline: {
+    position: 'relative',
+    top: 0,
+    right: 0,
+  },
+  childBadgeText: {
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '700',
+    color: CHILD_BADGE_TEXT,
+    includeFontPadding: false,
+  },
+  summaryTitleGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    flexShrink: 1,
+  },
+  infoTrigger: {
+    minWidth: 48,
+    minHeight: 48,
+    marginVertical: -14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  infoTriggerGlyph: {
+    fontSize: 16,
+    color: '#9ca3af',
+  },
+  infoBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(1, 4, 9, 0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  infoPopup: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#161b22',
+    borderWidth: 1,
+    borderColor: '#30363d',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 4,
+    gap: 10,
+  },
+  infoTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#f0f6fc',
+  },
+  infoLineRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  infoLine: {
+    fontSize: 13,
+    color: '#cbd5e1',
+    flexShrink: 1,
+  },
+  infoClose: {
+    alignSelf: 'flex-end',
+    marginTop: -4,
+    minHeight: 48,
+    minWidth: 48,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  infoCloseText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#a78bfa',
   },
   legendDot: {
     width: 8,

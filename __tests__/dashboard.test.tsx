@@ -2586,25 +2586,41 @@ describe('DashboardScreen', () => {
 
       // Legend renders all 4 categories with exact counts.
       expect(
-        renderer.root
-          .findByProps({ testID: 'dashboard-legend-need-input' })
-          .props.children.join(''),
-      ).toBe('0 Need input');
+        renderer.root.findByProps({ testID: 'dashboard-legend-need-input' }).props
+          .children,
+      ).toBe('Need input');
       expect(
-        renderer.root
-          .findByProps({ testID: 'dashboard-legend-running' })
-          .props.children.join(''),
-      ).toBe('2 Running');
+        renderer.root.findByProps({
+          testID: 'dashboard-distribution-parents-need-input',
+        }).props.children,
+      ).toBe(0);
       expect(
-        renderer.root
-          .findByProps({ testID: 'dashboard-legend-done/idle' })
-          .props.children.join(''),
-      ).toBe('2 Done/idle');
+        renderer.root.findByProps({ testID: 'dashboard-legend-running' }).props
+          .children,
+      ).toBe('Running');
       expect(
-        renderer.root
-          .findByProps({ testID: 'dashboard-legend-error' })
-          .props.children.join(''),
-      ).toBe('0 Error');
+        renderer.root.findByProps({
+          testID: 'dashboard-distribution-parents-running',
+        }).props.children,
+      ).toBe(2);
+      expect(
+        renderer.root.findByProps({ testID: 'dashboard-legend-done/idle' }).props
+          .children,
+      ).toBe('Done/idle');
+      expect(
+        renderer.root.findByProps({
+          testID: 'dashboard-distribution-parents-done/idle',
+        }).props.children,
+      ).toBe(2);
+      expect(
+        renderer.root.findByProps({ testID: 'dashboard-legend-error' }).props
+          .children,
+      ).toBe('Error');
+      expect(
+        renderer.root.findByProps({
+          testID: 'dashboard-distribution-parents-error',
+        }).props.children,
+      ).toBe(0);
 
       // Needs input section is completely absent when 0 pending.
       expect(
@@ -3104,8 +3120,12 @@ describe('DashboardScreen', () => {
         testID: 'dashboard-bar-segment-done/idle',
       });
 
-      expect(niSeg.props.accessibilityLabel).toBe('1 Need input');
-      expect(idleSeg.props.accessibilityLabel).toBe('19 Done/idle');
+      expect(niSeg.props.accessibilityLabel).toBe(
+        'Need input: 1 parent session, 0 child sessions',
+      );
+      expect(idleSeg.props.accessibilityLabel).toBe(
+        'Done/idle: 19 parent sessions, 0 child sessions',
+      );
 
       const niFlatStyle = Object.assign({}, ...(Array.isArray(niSeg.props.style) ? niSeg.props.style : [niSeg.props.style]));
       const idleFlatStyle = Object.assign({}, ...(Array.isArray(idleSeg.props.style) ? idleSeg.props.style : [idleSeg.props.style]));
@@ -3117,7 +3137,7 @@ describe('DashboardScreen', () => {
       // 5% of 320dp = 16dp (< 17dp needed for '1'), so inner Text is omitted while 95% keeps '19'.
       expect(niSeg.findAllByType(Text)).toHaveLength(0);
       expect(idleSeg.findAllByType(Text).map(node => String(node.props.children))).toContain('19');
-      expect(getAllText(renderer)).toContain('1 Need input');
+      expect(getAllText(renderer)).toContain('Need input');
     } finally {
       await ReactTestRenderer.act(async () => {
         renderer.unmount();

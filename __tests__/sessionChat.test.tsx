@@ -595,6 +595,18 @@ describe('SessionChatScreen contract & failure mode fixtures', () => {
       expect(textBefore).toContain('out-1');
       expect(textBefore).not.toContain('sess-fixture-codex-1');
 
+      // Spawnea mark sits in the header next to the title, beside back and the connection badge.
+      const header = renderer.root.findByProps({ testID: 'session-chat-header' });
+      expect(
+        header.findAllByProps({ testID: 'spawnea-mark-icon' }).length,
+      ).toBeGreaterThan(0);
+      expect(
+        header.findAllByProps({ testID: 'session-chat-title' }).length,
+      ).toBeGreaterThan(0);
+      expect(
+        header.findAllByProps({ testID: 'session-chat-back-button' }).length,
+      ).toBeGreaterThan(0);
+
       const toolToggle = renderer.root.findByProps({
         testID: 'session-chat-tool-toggle-turn-turn-trunc-tools-tool-1',
       });

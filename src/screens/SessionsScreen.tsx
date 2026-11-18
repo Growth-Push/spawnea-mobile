@@ -42,7 +42,7 @@ import {
   buildSessionsListTree,
   computeSessionsHeaderSummary,
   formatChildrenToggleLabels,
-  formatHarnessName,
+  formatHarnessIdentity,
   formatHostName,
   formatProjectName,
   formatRelativeActivity,
@@ -487,7 +487,7 @@ function SessionMetadataRow({
 }): React.JSX.Element {
   const projectLabel = formatProjectName(session);
   const hostLabel = formatHostName(session);
-  const harnessLabel = formatHarnessName(session);
+  const harnessIdentity = formatHarnessIdentity(session);
   const branchLabel = session.worktree?.branch?.trim() || null;
   const relativeActivity = formatRelativeActivity(
     session.lastActivityAt,
@@ -508,16 +508,24 @@ function SessionMetadataRow({
         style={styles.metaItem}
         accessible
         accessibilityLabel={`Host: ${hostLabel}`}>
-        <HostIcon color="#8b949e" size={iconSize} />
+        <HostIcon color="#8b949e" size={iconSize} hostName={hostLabel} />
         <Text style={styles.metaText}>{hostLabel}</Text>
       </View>
 
       <View
         style={styles.metaItem}
         accessible
-        accessibilityLabel={`Harness: ${harnessLabel}`}>
-        <HarnessIcon color="#a78bfa" size={iconSize} />
-        <Text style={styles.metaText}>{harnessLabel}</Text>
+        accessibilityLabel={harnessIdentity.accessibilityLabel}>
+        <HarnessIcon
+          color="#a78bfa"
+          size={iconSize}
+          harnessId={session.harness.id}
+          harnessName={session.harness.name}
+          harnessCommand={session.harness.command}
+        />
+        <Text style={styles.metaText} numberOfLines={2}>
+          {harnessIdentity.label}
+        </Text>
       </View>
 
       {branchLabel ? (

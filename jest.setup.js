@@ -75,3 +75,22 @@ jest.mock('react-native-screens', () => {
     FullWindowOverlay: ({ children }) => children,
   };
 });
+
+jest.mock('react-native-svg', () => {
+  const React = require('react');
+  const makeMockSvgElement = name =>
+    ({ children, ...props }) =>
+      React.createElement(name, props, children);
+
+  const Svg = makeMockSvgElement('RNSVGSvg');
+  return {
+    __esModule: true,
+    default: Svg,
+    Svg,
+    Path: makeMockSvgElement('RNSVGPath'),
+    Circle: makeMockSvgElement('RNSVGCircle'),
+    Rect: makeMockSvgElement('RNSVGRect'),
+    Line: makeMockSvgElement('RNSVGLine'),
+    G: makeMockSvgElement('RNSVGGroup'),
+  };
+});

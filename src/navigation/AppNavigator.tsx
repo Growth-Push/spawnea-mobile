@@ -2,8 +2,10 @@ import React from 'react';
 import { StyleSheet, View } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import {
+  DarkTheme,
   NavigationContainer,
   type NavigatorScreenParams,
+  type Theme,
 } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
@@ -183,14 +185,33 @@ function SessionsStackNavigator({
   );
 }
 
+const SPAWNEA_NAV_THEME: Theme = {
+  ...DarkTheme,
+  colors: {
+    ...DarkTheme.colors,
+    primary: '#a78bfa',
+    background: '#0d1117',
+    card: '#0d1117',
+    text: '#f0f6fc',
+    border: '#21262d',
+    notification: '#a78bfa',
+  },
+};
+
 export function AppNavigator(): React.JSX.Element {
   return (
-    <NavigationContainer>
+    <NavigationContainer theme={SPAWNEA_NAV_THEME}>
       <Tab.Navigator
         initialRouteName="DashboardTab"
         screenOptions={{
           headerTitleAlign: 'left',
           tabBarLabelStyle: { fontSize: 12, fontWeight: '600' },
+          tabBarStyle: {
+            backgroundColor: '#0d1117',
+            borderTopColor: '#21262d',
+          },
+          tabBarActiveTintColor: '#a78bfa',
+          tabBarInactiveTintColor: '#8b949e',
         }}>
         <Tab.Screen
           name="DashboardTab"
@@ -198,12 +219,6 @@ export function AppNavigator(): React.JSX.Element {
             title: 'Dashboard',
             tabBarLabel: 'Dashboard',
             headerShown: false,
-            tabBarStyle: {
-              backgroundColor: '#0d1117',
-              borderTopColor: '#21262d',
-            },
-            tabBarActiveTintColor: '#a78bfa',
-            tabBarInactiveTintColor: '#8b949e',
             tabBarIcon: renderDashboardTabIcon,
           }}>
           {({
@@ -236,12 +251,6 @@ export function AppNavigator(): React.JSX.Element {
             tabBarLabel: 'Sessions',
             tabBarButtonTestID: 'sessions-tab-button',
             headerShown: false,
-            tabBarStyle: {
-              backgroundColor: '#0d1117',
-              borderTopColor: '#21262d',
-            },
-            tabBarActiveTintColor: '#a78bfa',
-            tabBarInactiveTintColor: '#8b949e',
             tabBarIcon: renderSessionsTabIcon,
           }}>
           {({
@@ -261,6 +270,19 @@ export function AppNavigator(): React.JSX.Element {
           options={{
             title: 'Settings',
             tabBarLabel: 'Settings',
+            headerStyle: {
+              backgroundColor: '#0d1117',
+              borderBottomWidth: 1,
+              borderBottomColor: '#21262d',
+              elevation: 0,
+              shadowOpacity: 0,
+            },
+            headerTintColor: '#f0f6fc',
+            headerTitleStyle: {
+              fontSize: 20,
+              fontWeight: '700',
+              color: '#f0f6fc',
+            },
             tabBarIcon: renderSettingsTabIcon,
           }}
         />
