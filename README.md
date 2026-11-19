@@ -7,17 +7,14 @@ Android companion app for [Spawnea](https://github.com/Growth-Push/spawnea): mon
 ![Platform: Android 7.0+](https://img.shields.io/badge/platform-Android%207.0%2B-3DDC84.svg)
 ![React Native 0.88](https://img.shields.io/badge/React%20Native-0.88-61DAFB.svg)
 
-<!--
-SCREENSHOTS: not captured yet. Add the images under docs/screenshots/ and
-uncomment this block (see the capture list in the release report).
-
 <p align="center">
-  <img src="docs/screenshots/dashboard.png" alt="Dashboard" width="220">
-  <img src="docs/screenshots/sessions.png" alt="Sessions list" width="220">
-  <img src="docs/screenshots/chat.png" alt="Session chat" width="220">
-  <img src="docs/screenshots/settings.png" alt="Settings" width="220">
+  <img src="docs/screenshots/dashboard.png" alt="Dashboard: session distribution by status with parent and child counts, and sessions that need input" width="190">
+  <img src="docs/screenshots/sessions.png" alt="Sessions list with filters and an expanded parent session showing its child sessions" width="190">
+  <img src="docs/screenshots/chat.png" alt="Session chat: conversation history, live terminal output and a reply box" width="190">
+  <img src="docs/screenshots/settings.png" alt="Settings: server URL, key stored in the Android Keystore and a successful connection test" width="190">
 </p>
--->
+
+<p align="center"><sub>Dashboard, Sessions, Session/Chat and Settings. Screenshots come from an Android emulator talking to a mock API with fictional sessions, not real data.</sub></p>
 
 ## What it is
 
