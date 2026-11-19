@@ -7,7 +7,9 @@ This document records the source, license, and usage conditions for every brand 
 | Asset | Usage | Source | License / Conditions |
 |---|---|---|---|
 | **Spawnea mark** | Launcher (`ic_launcher`, `ic_launcher_round`, `ic_launcher_foreground`, `ic_launcher_monochrome`), splash (`ic_splash_logo`), and `SpawneaMarkIcon` | Vectorized faithfully from `spawnea/docs/assets/spawnea-logo.png` (`#009ebb`, `#6a5bfd`, `#c3e71c`) | Apache License 2.0 (`spawnea` repository `LICENSE`). Preserves original shapes and colors without reinterpretation. |
-| **Growth Push mark** | Splash branding (`ic_splash_branding`; **shown only on Android 12+ / API 31+**, see below) and Settings footer signature (`by Growth Push`) | `growth-push-runbook/customers/growth-push/p2_landing_site/assets/growth-push-logo.svg` (`approved_v1`) | First-party Growth Push brand asset. Used per `brand_identity.md`: symbol minimum size >= 32 px, clear space >= green node diameter (~17% of symbol width), original colors (`#00A7C2`, `#6D5DFC`, `#C6F432`). |
+| **Growth Push mark** | Splash branding (`ic_splash_branding`; **shown only on Android 12+ / API 31+**, see below) and Settings footer signature (`by Growth Push`) | Growth Push logo (approved first-party SVG) | First-party Growth Push brand asset. Original colors (`#00A7C2`, `#6D5DFC`, `#C6F432`), shown at a symbol size of at least 32 px with clear space around the mark. |
+
+**Trademarks.** The Apache License 2.0 that covers this repository's code (Section 6) does not grant permission to use the Growth Push or Spawnea names, logos or marks, which are reserved to their owners, except for reasonable and customary descriptive use. Forks should replace the launcher icon, splash and "by Growth Push" signature with their own branding.
 
 ## Splash signature availability
 
@@ -88,3 +90,29 @@ ISC License. Copyright (c) 2026 Lucide Icons and Contributors. Permission to use
 | unknown status (fallback) | `circle-question-mark` (`help-circle`) |
 
 The MIT License (MIT) (for the icons listed above). Copyright (c) 2013-present Cole Bemis. Permission is hereby granted, free of charge, to any person obtaining a copy of the Software and associated documentation files, to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions: The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+## Lobe Icons (MIT)
+
+The Claude, Antigravity, DeepSeek, Kimi, Ollama, Gemini, Cursor and Hermes marks in `src/dashboard/iconPaths.ts` are copied from `@lobehub/icons-static-svg@1.103.0` (<https://github.com/lobehub/lobe-icons>), distributed under the MIT License:
+
+> MIT License
+>
+> Copyright (c) 2023 LobeHub
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+The CC0-1.0 marks from Simple Icons require no attribution; they are listed above for traceability.
+
+## Runtime and build dependencies
+
+Dependencies are **not vendored** in this repository; they are installed from the registries named in `package-lock.json` and the Gradle build. License metadata recorded in `package-lock.json` (891 packages, of which 251 are not dev-only) is permissive throughout:
+
+- Production packages: MIT (212), ISC (18), BSD-2-Clause (8), BSD-3-Clause (5), Apache-2.0 (2 plus 1 dual MIT/Apache-2.0), CC0-1.0, BlueOak-1.0.0, 0BSD, a dual MIT/CC0-1.0, and `caniuse-lite` (CC-BY-4.0 browser-data; build-time only, not shipped in the APK).
+- No GPL, AGPL, LGPL or other copyleft packages are present. One development-only package (`exit`) carries no `license` field in the lock file; its published manifest declares MIT.
+- Android native dependencies pulled by Gradle (React Native, Hermes, OkHttp, AndroidX Biometric, AndroidX Core SplashScreen) are MIT or Apache-2.0.
+
+Anyone distributing a built APK is responsible for bundling the notices those licenses require (for example an open-source licenses screen); this repository ships source only.
