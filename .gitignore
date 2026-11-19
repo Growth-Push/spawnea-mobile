@@ -231,3 +231,15 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# --- Public-release hygiene (secrets, local agent/CLI state, cloud credentials) ---
+# Local CLI/agent logs and state may contain account identifiers; never commit them.
+error.log
+.claude/
+.codex/
+.agents/
+.aws/
+# Firebase / push config and platform signing material
+google-services.json
+GoogleService-Info.plist
+**/signing.properties
