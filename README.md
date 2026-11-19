@@ -25,6 +25,12 @@ uncomment this block (see the capture list in the release report).
 
 It is a thin client. There is no hosted backend, no account and no analytics: the app only talks to the Spawnea Desktop instance you point it at.
 
+## Quick start
+
+1. **Run Spawnea Desktop with its Mobile API enabled**: [Set up Spawnea Desktop](#1-set-up-spawnea-desktop-server-side).
+2. **Install the app on your Android device.** It is not on Google Play, so you build the APK and sideload it: [Install on a device](#2-install-the-app-on-a-device-no-app-store).
+3. **Enter the server URL and key in the app's Settings**: [Configure the app](#3-configure-the-app).
+
 ## How it relates to Spawnea
 
 Spawnea Desktop exposes an optional, disabled-by-default HTTP API that is documented in [`docs/mobile-api.md`](https://github.com/Growth-Push/spawnea/blob/main/docs/mobile-api.md) and implemented in Spawnea's `apps/desktop/src/main/mobile-api-server.ts`. Spawnea Mobile is the client for that API:
@@ -45,63 +51,129 @@ The app does not run without a reachable Spawnea Desktop instance that has the M
 - **Settings**: server URL and API key management with connection test.
 - Foreground polling (10 s by default); polling pauses when the app leaves the foreground.
 
-## Build and run
+## 1. Set up Spawnea Desktop (server side)
 
-### Prerequisites
+You need [Spawnea](https://github.com/Growth-Push/spawnea) installed and working on your computer first; follow its [getting started guide](https://github.com/Growth-Push/spawnea/blob/main/docs/getting-started.md). Then enable its Mobile API. The authoritative reference is the [Spawnea mobile API guide](https://github.com/Growth-Push/spawnea/blob/main/docs/mobile-api.md); in short:
+
+1. **Choose a secret key** of at least 32 characters and keep it in a password manager. Hash it (the desktop stores only the hash):
+
+   ```bash
+   printf '%s' "$MOBILE_SECRET_KEY" | spawnea hash-key
+   ```
+
+2. **Enable the API** in Spawnea's `config.yaml` (by default `~/.config/spawnea/config.yaml`, or `$SPAWNEA_USER_DATA_DIR/config.yaml`), pasting the hash you just generated:
+
+   ```yaml
+   api:
+     enabled: true
+     port: 5757            # optional; 5757 is the default
+     key_hash: "$argon2id$v=19$..."
+   ```
+
+3. **Restart Spawnea Desktop.** If `key_hash` is missing or invalid, Spawnea leaves the port closed.
+4. **Make the desktop reachable from your phone.** Spawnea listens on `127.0.0.1` only, so you expose it yourself. The recommended way is [Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve) inside your private tailnet, with the Tailscale app signed in on the phone:
+
+   ```bash
+   tailscale serve --bg --https=5757 http://127.0.0.1:5757
+   tailscale serve status
+   ```
+
+   Your server URL is then `https://<machine>.<tailnet>.ts.net:5757`. **Never use Tailscale Funnel**: it would expose the API to the public internet.
+
+## 2. Install the app on a device (no app store)
+
+Spawnea Mobile is not on Google Play and this repository does not publish ready-made APKs, so you build the APK yourself and install it directly ("sideload"). Both options below need the build prerequisites.
+
+### Build prerequisites
 
 - Node.js `>= 22.11.0` and npm
 - JDK 17 (the version CI uses; `javac` is required by Gradle)
 - Android SDK: compileSdk `37`, targetSdk `36`, minSdk `24` (Android 7.0), build-tools `37.0.0`, NDK `27.1.12297006`
 - `JAVA_HOME`, `ANDROID_HOME` and `ANDROID_SDK_ROOT` set in your shell
-- A device or emulator with a **strong biometric enrolled** (for example a fingerprint): the app has no PIN fallback
-
-### Install and verify
+- A phone or emulator with a **strong biometric enrolled** (for example a fingerprint): the app has no PIN fallback
 
 ```bash
+git clone https://github.com/Growth-Push/spawnea-mobile.git
+cd spawnea-mobile
 npm ci --ignore-scripts
+```
+
+`-PreactNativeArchitectures=arm64-v8a` in the commands below builds only for 64-bit ARM, which covers most modern phones and keeps the APK small. Omit it to build all four ABIs (needed for x86 emulators).
+
+### Option A: debug build over USB (quickest)
+
+1. On the phone, enable Developer options and **USB debugging**, connect it with a cable and confirm `adb devices` lists it.
+2. Build and install:
+
+   ```bash
+   cd android
+   ./gradlew assembleDebug -PreactNativeArchitectures=arm64-v8a
+   adb install -r app/build/outputs/apk/debug/app-debug.apk
+   ```
+
+The debug APK is signed with the public Android debug key and bundles its JavaScript, so it runs standalone. It is fine for trying the app; for daily use prefer Option B.
+
+### Option B: signed release APK (recommended for daily use)
+
+An unsigned release APK cannot be installed on a device, so create your own signing key once. Keep it **outside this repository** and back it up: updates must be signed with the same key.
+
+```bash
+keytool -genkeypair -v -keystore "$HOME/spawnea-release.keystore" \
+  -alias spawnea -keyalg RSA -keysize 4096 -validity 10000
+```
+
+Build with all four signing settings (environment variables, or Gradle properties in a private `~/.gradle/gradle.properties`):
+
+```bash
+cd android
+SPAWNEA_RELEASE_STORE_FILE="$HOME/spawnea-release.keystore" \
+SPAWNEA_RELEASE_STORE_PASSWORD='...' \
+SPAWNEA_RELEASE_KEY_ALIAS=spawnea \
+SPAWNEA_RELEASE_KEY_PASSWORD='...' \
+./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
+```
+
+The signed APK is `android/app/build/outputs/apk/release/app-release.apk`. Install it with `adb install -r`, or copy it to the phone and open it from a file manager (Android will ask you to allow "Install unknown apps" for that app, and Play Protect may warn that the app is unrecognized).
+
+A partial set of signing settings fails the build instead of silently falling back to the debug keystore. Without any of them, `assembleRelease` produces `app-release-unsigned.apk`, which is only useful for verification or external signing. The `android/app/debug.keystore` in this repository is the standard public Android debug key, used only for debug builds.
+
+## 3. Configure the app
+
+1. Open the **Settings** tab.
+2. **Server URL**: enter your server's base URL, for example `https://<machine>.<tailnet>.ts.net:5757`. It must be `https://`, without a path, credentials or query string. (Debug builds on an emulator may use `http://127.0.0.1:5757` after `adb reverse tcp:5757 tcp:5757`.)
+3. **API Key**: enter the plaintext key whose hash you put in Spawnea's `config.yaml`.
+4. Tap **Save** and authenticate with your strong biometric (for example a fingerprint) when asked. The key is stored in the Android Keystore and is never shown again.
+5. Tap **Test connection**. Success reads `Connection succeeded (HTTP 200). N sessions reported.`
+6. Open **Dashboard** or **Sessions**.
+
+Good to know:
+
+- **Rotating the key:** generate a new hash, update `key_hash`, restart Spawnea Desktop, then enter the new key under **Replace API Key** in Settings.
+- **Delete Settings** removes the URL and key from the phone only; it does not revoke the key on your Spawnea server.
+- **If Test connection fails:** check that Spawnea Desktop is running with the API enabled, `tailscale serve status` shows the port, the phone is signed in to the same tailnet, the URL is `https://` with the right port, and the key matches the saved hash.
+
+## Development
+
+```bash
 npm run typecheck
 npm run lint
 npm test -- --watchAll=false
 cd android && ./gradlew :app:testDebugUnitTest
 ```
 
-### Run a debug build
-
-With a device or emulator connected:
+To run against Metro with a connected device or emulator:
 
 ```bash
 npm start            # Metro bundler, in one terminal
 npm run android      # install and launch, in another
 ```
 
-Or build a standalone debug APK (JavaScript bundled in) and install it:
+### How changes are reviewed
 
-```bash
-cd android && ./gradlew assembleDebug
-adb install app/build/outputs/apk/debug/app-debug.apk
-```
+Every change goes through a pull request. CI runs ESLint, the TypeScript check, Jest, the Android unit tests with debug and release APK builds, a `gitleaks` secret scan over the full history, and `npm audit`. Pull requests also receive automated AI code review from OpenAI Codex (see the merged pull requests for examples).
 
-### Connect it to Spawnea Desktop
-
-1. Enable the Mobile API in Spawnea Desktop and generate a key hash, as described in the [Spawnea mobile API guide](https://github.com/Growth-Push/spawnea/blob/main/docs/mobile-api.md).
-2. Open **Settings** in the app, enter the server URL and the plaintext key, and run **Test connection**.
-   - Same machine as an emulator, debug build only: `adb reverse tcp:5757 tcp:5757`, then use `http://127.0.0.1:5757`.
-   - Real phone: expose the desktop port inside your private tailnet with `tailscale serve --bg --https=5757 http://127.0.0.1:5757` and use `https://<machine>.<tailnet>.ts.net:5757`. Never use Tailscale Funnel.
-
-### Release APK
-
-```bash
-cd android && ./gradlew assembleRelease
-```
-
-Without signing settings this produces an **unsigned** APK (`android/app/build/outputs/apk/release/app-release-unsigned.apk`) for verification or external signing. To sign it, provide all four of these as environment variables or Gradle properties, and keep the keystore and passwords outside version control:
-
-- `SPAWNEA_RELEASE_STORE_FILE` (absolute path, or relative to `android/`)
-- `SPAWNEA_RELEASE_STORE_PASSWORD`
-- `SPAWNEA_RELEASE_KEY_ALIAS`
-- `SPAWNEA_RELEASE_KEY_PASSWORD`
-
-A partial set fails the build instead of silently falling back to the debug keystore. The `android/app/debug.keystore` in this repository is the standard public Android debug key, used only for debug builds.
+<!-- Uncomment once CodeRabbit is installed on this repository:
+CodeRabbit also reviews pull requests on this repository. -->
 
 ## Security model
 
